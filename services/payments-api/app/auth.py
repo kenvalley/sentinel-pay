@@ -24,18 +24,49 @@ from functools import wraps
 from flask import request, jsonify
 
 
-def hash_password(password: str) -> str:
-    """Hash a password for storage.
+import os
+import time
+import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, InvalidHashError
 
-    V-APP-06: Uses MD5 with no salt. Trivially reversible for common passwords
-    via rainbow tables, and MD5 is cryptographically broken regardless.
-    """
-    return hashlib.md5(password.encode()).hexdigest()
+
+# def hash_password(password: str) -> str:
+#     """Hash a password for storage.
+
+#     V-APP-06: Uses MD5 with no salt. Trivially reversible for common passwords
+#     via rainbow tables, and MD5 is cryptographically broken regardless.
+#     """
+#     return hashlib.md5(password.encode()).hexdigest()
+
+
+# def verify_password(password: str, stored_hash: str) -> bool:
+#     return hash_password(password) == stored_hash
+
+_ph = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
+
+
+def hash_password(password: str) -> str:
+    """Hash a password using Argon2id — secure, salted, memory-hard."""
+    return _ph.hash(password)
 
 
 def verify_password(password: str, stored_hash: str) -> bool:
-    return hash_password(password) == stored_hash
-
+    """
+    Verify a password against a stored hash.
+    Transparently handles legacy MD5 hashes — detects by length and
+    absence of $ separator, verifies with MD5, returns True so the
+    caller can upgrade the hash on next login.
+    """
+    # Detect legacy MD5: 32-char hex, no $ separator
+    if len(stored_hash) == 32 and "$" not in stored_hash:
+        import hashlib
+        return hashlib.md5(password.encode()).hexdigest() == stored_hash
+    try:
+        return _ph.verify(stored_hash, password)
+    except (VerifyMismatchError, InvalidHashError):
+        return False
+    
 
 # BEFORE [DELETED!]
 # def issue_token(user_id: int, role: str) -> str:
