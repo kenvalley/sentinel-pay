@@ -4,9 +4,21 @@ These were originally on a separate internal-only network. The 'separate
 internal-only network' never materialised, and the endpoints now ship behind
 the same ALB as everything else.
 """
+
+
+# Before:
+# import base64
+# import pickle
+# from flask import Blueprint, request, jsonify
+
+
+# After:
 import base64
-import pickle
+import json
+from jsonschema import validate, ValidationError
 from flask import Blueprint, request, jsonify
+
+
 
 from app.db import get_connection
 from app.auth import require_auth
@@ -30,12 +42,32 @@ def restore_session():
     if not blob:
         return jsonify({"error": "session blob required"}), 400
 
+#    # Vulnerable code - BEFORE [FIXED!]
+    # try:
+    #     raw = base64.b64decode(blob)
+    #     session = pickle.loads(raw)
+    #     return jsonify({"restored": True, "session_keys": list(session.keys())})
+    # except Exception as e:
+    #     return jsonify({"error": str(e)}), 400
+
+#   Vulnerable code - AFTER [FIXED!]
+    SESSION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "user_id":    {"type": "integer"},
+        "role":       {"type": "string", "enum": ["admin", "finance"]},
+        "created_at": {"type": "string"},
+    },
+    "required": ["user_id", "role"],
+    "additionalProperties": False
+}
     try:
         raw = base64.b64decode(blob)
-        session = pickle.loads(raw)
+        session = json.loads(raw)        # JSON only — no code execution
+        validate(instance=session, schema=SESSION_SCHEMA)
         return jsonify({"restored": True, "session_keys": list(session.keys())})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    except (json.JSONDecodeError, ValidationError):
+        return jsonify({"error": "invalid session"}), 400
 
 
 @admin_bp.route("/users", methods=["GET"])
