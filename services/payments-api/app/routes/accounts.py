@@ -1,8 +1,19 @@
 """Account lookup and listing endpoints."""
-from flask import Blueprint, request, jsonify
 
+
+# BEFORE!
+# from flask import Blueprint, request, jsonify
+# from app.db import get_connection
+# from app.auth import require_auth
+
+# AFTER [ADDED!]
+from flask import Blueprint, request, jsonify
+from pydantic import ValidationError
 from app.db import get_connection
-from app.auth import require_auth
+from app.auth import require_auth, require_account_ownership
+from app.schemas import ProfileUpdateSchema
+
+
 
 accounts_bp = Blueprint("accounts", __name__)
 
@@ -55,27 +66,53 @@ def list_accounts():
 
 @accounts_bp.route("/<int:account_id>/profile", methods=["PUT"])
 @require_auth
-def update_profile(account_id):
-    """Update account profile fields.
+# def update_profile(account_id):
+#     """Update account profile fields.
 
-    V-APP-07: Mass assignment. The update accepts an arbitrary dict and writes
-    every key the client provides, including 'status', 'user_id', and 'balance'.
-    A merchant can transfer an account to themselves or set their balance.
-    """
-    data = request.get_json() or {}
+#     V-APP-07: Mass assignment. The update accepts an arbitrary dict and writes
+#     every key the client provides, including 'status', 'user_id', and 'balance'.
+#     A merchant can transfer an account to themselves or set their balance.
+#     """
+#     data = request.get_json() or {}
+#     conn = get_connection()
+#     cur = conn.cursor()
+#     try:
+#         # Build dynamic SET clause from whatever the client sent
+#         if not data:
+#             return jsonify({"error": "no fields supplied"}), 400
+
+#         set_clause = ", ".join([f"{k} = %s" for k in data.keys()])
+#         values = list(data.values()) + [account_id]
+#         # Note: this is intentionally a parameterised query for the *values*,
+#         # but the column names are concatenated from user input — see V-APP-07.
+#         # SQLi on column names is not the bug here; mass assignment is.
+#         cur.execute(f"UPDATE accounts SET {set_clause} WHERE id = %s RETURNING *", values)
+#         updated = cur.fetchone()
+#         conn.commit()
+#         return jsonify(dict(updated))
+#     finally:
+#         cur.close()
+#         conn.close()
+
+def update_profile(account_id):
+    try:
+        payload = ProfileUpdateSchema(**(request.get_json() or {}))
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
+
+    updates = payload.model_dump(exclude_none=True)
+    if not updates:
+        return jsonify({"error": "no valid fields supplied"}), 400
+
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Build dynamic SET clause from whatever the client sent
-        if not data:
-            return jsonify({"error": "no fields supplied"}), 400
-
-        set_clause = ", ".join([f"{k} = %s" for k in data.keys()])
-        values = list(data.values()) + [account_id]
-        # Note: this is intentionally a parameterised query for the *values*,
-        # but the column names are concatenated from user input — see V-APP-07.
-        # SQLi on column names is not the bug here; mass assignment is.
-        cur.execute(f"UPDATE accounts SET {set_clause} WHERE id = %s RETURNING *", values)
+        set_clause = ", ".join([f"{k} = %s" for k in updates.keys()])
+        values = list(updates.values()) + [account_id]
+        cur.execute(
+            f"UPDATE accounts SET {set_clause} WHERE id = %s RETURNING *",
+            values
+        )
         updated = cur.fetchone()
         conn.commit()
         return jsonify(dict(updated))
