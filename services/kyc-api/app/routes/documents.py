@@ -48,13 +48,30 @@ def upload_document():
         return jsonify({"error": str(e)}), 500
 
 
+# BEFORE [DELETED!]
+
+# @documents_bp.route("/<path:key>", methods=["GET"])
+# @require_auth
+# def get_document(key):
+#     """Fetch a previously uploaded document.
+
+#     No ownership check on the key. Identical pattern to V-APP-03 IDOR.
+#     """
+#     try:
+#         obj = _s3().get_object(Bucket=KYC_BUCKET, Key=key)
+#         return obj["Body"].read(), 200, {"Content-Type": obj.get("ContentType", "application/octet-stream")}
+#     except Exception as e:
+#         return jsonify({"error": str(e)}), 404
+
+
+# AFTER [ADDED!]
+
 @documents_bp.route("/<path:key>", methods=["GET"])
 @require_auth
 def get_document(key):
-    """Fetch a previously uploaded document.
-
-    No ownership check on the key. Identical pattern to V-APP-03 IDOR.
-    """
+    expected_prefix = f"users/{request.current_user_id}/"
+    if not key.startswith(expected_prefix):
+        return jsonify({"error": "forbidden"}), 403
     try:
         obj = _s3().get_object(Bucket=KYC_BUCKET, Key=key)
         return obj["Body"].read(), 200, {"Content-Type": obj.get("ContentType", "application/octet-stream")}

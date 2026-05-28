@@ -7,8 +7,10 @@ from app.auth import require_auth
 accounts_bp = Blueprint("accounts", __name__)
 
 
+from app.auth import require_auth, require_account_ownership # ADDED!
 @accounts_bp.route("/<int:account_id>", methods=["GET"])
 @require_auth
+@require_account_ownership # ADDED!
 def get_account(account_id):
     """Look up an account by ID.
 
