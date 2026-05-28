@@ -17,9 +17,36 @@ def create_app():
     def health():
         return jsonify({"status": "ok", "service": "kyc-api"})
 
+    # ADDED! Added error handler for uncaught exceptions to prevent verbose stack traces from being exposed in responses.
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        import uuid
+        import logging
+        import traceback
+        error_id = str(uuid.uuid4())[:8].upper()
+        logging.getLogger("sentinelpay.errors").error(
+            "unhandled_exception",
+            extra={
+                "error_id":   error_id,
+                "error_type": type(e).__name__,
+                "trace":      traceback.format_exc(),
+            }
+        )
+        return jsonify({
+            "error":    "An unexpected error occurred.",
+            "error_id": error_id
+        }), 500
+
     return app
 
 
+# if __name__ == "__main__":
+#     app = create_app()
+#     app.run(host="0.0.0.0", port=8002, debug=True)
+
+
+# FIXED: Added environment-based debug mode and standardized error handling for better security and operational visibility.
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=8002, debug=True)
+    debug = os.environ.get("ENVIRONMENT", "production") != "production"
+    app.run(host="0.0.0.0", port=8002, debug=debug)
