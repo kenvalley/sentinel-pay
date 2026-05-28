@@ -21,18 +21,31 @@ def search_transactions():
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Concatenation, not parameterisation. Bypass auth scoping with a clever payload.
+        # Concatenation, not parameterisation. Bypass auth scoping with a clever payload. - BEFORE
+        # query = (
+        #     "SELECT id, account_id, reference, amount, currency, direction, "
+        #     "counterparty, description, status, created_at "
+        #     f"FROM transactions WHERE (reference LIKE '%{q}%' "
+        #     f"OR counterparty LIKE '%{q}%' OR description LIKE '%{q}%')"
+        # )
+        # if account_id:
+        #     query += f" AND account_id = {account_id}"
+        # query += " ORDER BY created_at DESC LIMIT 50"
+        # cur.execute(query)
+
+        # Concatenation, not parameterisation. Bypass auth scoping with a clever payload - AFTER [FIXED!]
         query = (
             "SELECT id, account_id, reference, amount, currency, direction, "
             "counterparty, description, status, created_at "
-            f"FROM transactions WHERE (reference LIKE '%{q}%' "
-            f"OR counterparty LIKE '%{q}%' OR description LIKE '%{q}%')"
+            "FROM transactions "
+            "WHERE (reference ILIKE %s OR counterparty ILIKE %s OR description ILIKE %s) "
+            "AND account_id IN (SELECT id FROM accounts WHERE user_id = %s) "
+            "ORDER BY created_at DESC LIMIT 50"
         )
-        if account_id:
-            query += f" AND account_id = {account_id}"
-        query += " ORDER BY created_at DESC LIMIT 50"
+        pattern = f"%{q}%"
+        cur.execute(query, (pattern, pattern, pattern, request.current_user_id))
 
-        cur.execute(query)
+        
         rows = cur.fetchall()
         return jsonify([dict(r) for r in rows])
     finally:

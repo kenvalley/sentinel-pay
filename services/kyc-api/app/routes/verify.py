@@ -47,14 +47,30 @@ def lookup_kyc():
     conn = get_connection()
     cur = conn.cursor()
     try:
+
+        # Vulnerable code - BEFORE [FIXED!]
+        # if bvn:
+        #     query = f"SELECT * FROM kyc_records WHERE bvn = '{bvn}'"
+        # elif nin:
+        #     query = f"SELECT * FROM kyc_records WHERE nin = '{nin}'"
+        # else:
+        #     return jsonify({"error": "bvn or nin required"}), 400
+        # cur.execute(query)
+
+        # Vulnerable code - AFTER [FIXED!]
         if bvn:
-            query = f"SELECT * FROM kyc_records WHERE bvn = '{bvn}'"
+            cur.execute(
+                "SELECT * FROM kyc_records WHERE bvn = %s AND user_id = %s",
+                (bvn, request.current_user_id)
+            )
         elif nin:
-            query = f"SELECT * FROM kyc_records WHERE nin = '{nin}'"
+            cur.execute(
+                "SELECT * FROM kyc_records WHERE nin = %s AND user_id = %s",
+                (nin, request.current_user_id)
+            )
         else:
             return jsonify({"error": "bvn or nin required"}), 400
 
-        cur.execute(query)
         records = cur.fetchall()
         return jsonify([dict(r) for r in records])
     finally:
