@@ -5,6 +5,8 @@ from flask import Blueprint, request, jsonify
 
 from app.db import get_connection
 from app.auth import require_auth
+from app.audit import emit
+
 
 wallets_bp = Blueprint("wallets", __name__)
 
@@ -37,9 +39,25 @@ def credit_wallet(account_id):
             "VALUES (%s, %s, %s, 'credit', %s, 'completed')",
             (account_id, reference, amount, description)
         )
+
+
+        # conn.commit()
+        # return jsonify({"reference": reference, "new_balance": str(new_balance)})
+
+        # FIXED
         conn.commit()
+        emit(
+            event_type="wallet.debit",
+            outcome="success",
+            account_id=account_id,
+            amount=str(amount),
+            reference=reference,
+            new_balance=str(new_balance),
+        )
 
         return jsonify({"reference": reference, "new_balance": str(new_balance)})
+    
+
     finally:
         cur.close()
         conn.close()
@@ -118,8 +136,21 @@ def debit_wallet(account_id):
             return jsonify({"error": "account not found"}), 404
 
         current_balance = Decimal(str(row["balance"]))
+
+        # if current_balance < amount:
+        #     conn.rollback()
+        #     return jsonify({"error": "insufficient funds"}), 400
+
+        # FIXED: Emit failure event for insufficient funds, and include reason in response.
         if current_balance < amount:
             conn.rollback()
+            emit(
+                event_type="wallet.debit",
+                outcome="failure",
+                reason="insufficient_funds",
+                account_id=account_id,
+                amount=str(amount),
+            )
             return jsonify({"error": "insufficient funds"}), 400
 
         new_balance = current_balance - amount
@@ -135,9 +166,23 @@ def debit_wallet(account_id):
             "VALUES (%s, %s, %s, 'debit', %s, %s, 'completed')",
             (account_id, reference, amount, counterparty, description)
         )
-        conn.commit()  # atomic — both rows commit together
+        # conn.commit()  # atomic — both rows commit together
+        # return jsonify({"reference": reference, "new_balance": str(new_balance)})
+    
+        # FIXED
+        conn.commit()
+        emit(
+            event_type="wallet.credit",
+            outcome="success",
+            account_id=account_id,
+            amount=str(amount),
+            reference=reference,
+            new_balance=str(new_balance),
+        )
 
         return jsonify({"reference": reference, "new_balance": str(new_balance)})
+
+
     except Exception:
         conn.rollback()
         raise
