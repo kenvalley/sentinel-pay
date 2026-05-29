@@ -1,0 +1,30 @@
+# Terraform state — stored remotely in S3
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Plan files — may contain sensitive values
+tfplan
+tfplan.json
+
+# Local variable values — never commit
+terraform.tfvars
+*.auto.tfvars
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# OPA / conftest output
+.conftest/
+
+# OS
+.DS_Store
+Thumbs.db
