@@ -13,13 +13,13 @@ environment  = "production"
 owner        = "platform"
 
 # Identity — GitHub OIDC trust
-github_org  = "YOUR_GITHUB_USERNAME" 
+github_org  = "YOUR_GITHUB_USERNAME"   # e.g. "kenvalley"
 github_repo = "YOUR_REPO_NAME"         # e.g. "sentinel-pay"
 
 # Notifications
 alarm_email = "YOUR_EMAIL@example.com"
 
-# ── Values below can stay as defaults unless we absolutely need to change them ──────────
+# ── Values below can stay as defaults unless you need to change them ──────────
 
 # Network
 vpc_cidr                  = "10.0.0.0/16"
