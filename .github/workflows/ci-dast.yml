@@ -1,9 +1,6 @@
 # ci-dast.yml
 # Reusable workflow — Dynamic Application Security Testing
-# Called by ci-pr-gate.yml on every PR.
-# Tool: OWASP ZAP baseline scan
-# Spins up ephemeral environment, runs ZAP, tears down.
-# HIGH risk findings block the PR.
+# Tool: OWASP ZAP baseline scan against ephemeral payments-api
 
 name: CI — DAST
 
@@ -23,22 +20,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Start ephemeral environment ────────────────────────────────────────
-      - name: Create test environment file
+      - name: Fix requirements for DAST build
         run: |
-          cat > .env.test << 'EOF'
-          JWT_SECRET=test-secret-for-dast-only
-          DATABASE_URL=postgresql://sentinel:sentinel123@postgres:5432/sentinelpay
-          REDIS_URL=redis://redis:6379/0
-          AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-          AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-          AWS_REGION=eu-west-2
-          KYC_BUCKET=test-bucket
-          WEBHOOK_TIMEOUT=10
-          ENVIRONMENT=development
-          EOF
+          sed -i 's/psycopg2-binary==2.9.1/psycopg2-binary==2.9.9/' services/payments-api/requirements.txt || true
+          grep -q "werkzeug" services/payments-api/requirements.txt || echo "werkzeug==2.0.3" >> services/payments-api/requirements.txt
 
-      - name: Create DAST docker-compose override
+      - name: Create DAST docker-compose
         run: |
           cat > docker-compose.dast.yml << 'EOF'
           version: "3.9"
@@ -56,7 +43,6 @@ jobs:
                 retries: 10
               volumes:
                 - ./seed/init.sql:/docker-entrypoint-initdb.d/init.sql
-
             redis:
               image: redis:7-alpine
               healthcheck:
@@ -64,7 +50,6 @@ jobs:
                 interval: 5s
                 timeout: 3s
                 retries: 5
-
             payments-api:
               build: ./services/payments-api
               ports:
@@ -84,48 +69,56 @@ jobs:
                   condition: service_healthy
                 redis:
                   condition: service_healthy
-              healthcheck:
-                test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
-                interval: 10s
-                timeout: 5s
-                retries: 12
-                start_period: 30s
           EOF
 
-      - name: Fix requirements for DAST build
-        run: |
-          # Ensure compatible versions for local build
-          sed -i 's/psycopg2-binary==2.9.1/psycopg2-binary==2.9.9/' services/payments-api/requirements.txt || true
-          grep -q "werkzeug" services/payments-api/requirements.txt || echo "werkzeug==2.0.3" >> services/payments-api/requirements.txt
-
       - name: Start ephemeral environment
-        run: |
-          docker compose -f docker-compose.dast.yml up -d --build
-          echo "Waiting for services to be healthy..."
+        run: docker compose -f docker-compose.dast.yml up -d --build
 
       - name: Wait for payments-api to be ready
         run: |
+          echo "Waiting for payments-api..."
           for i in $(seq 1 30); do
-            STATUS=$(docker compose -f docker-compose.dast.yml ps payments-api --format json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('Health','') if isinstance(d,list) else d.get('Health',''))" 2>/dev/null || echo "unknown")
-            echo "Attempt $i: payments-api health = $STATUS"
             if curl -sf http://localhost:8001/health > /dev/null 2>&1; then
-              echo "payments-api is ready"
+              echo "payments-api is ready after $i attempts"
+              curl -s http://localhost:8001/health
               break
             fi
             if [ "$i" -eq "30" ]; then
-              echo "payments-api did not become ready"
+              echo "payments-api did not become ready — showing logs:"
               docker compose -f docker-compose.dast.yml logs payments-api
               exit 1
             fi
+            echo "Attempt $i: not ready..."
             sleep 5
           done
 
+      - name: Smoke test key endpoints
+        run: |
+          echo "Testing /health..."
+          curl -sv http://localhost:8001/health
+          echo ""
+          echo "Testing /v1/auth/login..."
+          curl -sv -X POST http://localhost:8001/v1/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"test@test.com","password":"test"}' || true
+
       # ── ZAP Baseline Scan ─────────────────────────────────────────────────
+      - name: Prepare ZAP output directory
+        run: |
+          mkdir -p /tmp/zap-output
+          chmod 777 /tmp/zap-output
+          # Copy rules file to a location ZAP can read
+          mkdir -p /tmp/zap-rules
+          cp .github/zap/rules.tsv /tmp/zap-rules/rules.tsv
+          chmod -R 777 /tmp/zap-rules
+
       - name: Run OWASP ZAP baseline scan
         run: |
           docker run --rm \
             --network host \
-            -v $(pwd):/zap/wrk/:rw \
+            --user root \
+            -v /tmp/zap-output:/zap/wrk/:rw \
+            -v /tmp/zap-rules:/zap/rules/:ro \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
               -t http://localhost:8001 \
@@ -133,8 +126,12 @@ jobs:
               -J zap-report.json \
               -I \
               -l WARN \
-              -c /zap/wrk/.github/zap/rules.tsv || true
+              -c /zap/rules/rules.tsv || true
+
+          cp /tmp/zap-output/zap-report.json . 2>/dev/null || true
+          cp /tmp/zap-output/zap-report.html . 2>/dev/null || true
           echo "ZAP scan complete"
+          ls -la /tmp/zap-output/
 
       - name: Evaluate ZAP results
         run: |
@@ -158,11 +155,9 @@ jobs:
               for alert in site.get("alerts", []):
                   risk = alert.get("riskdesc", "").upper()
                   name = alert.get("name", "")
-                  desc = alert.get("desc", "")[:100]
-
                   if "HIGH" in risk:
                       high_alerts.append(name)
-                      print(f"[HIGH] {name}: {desc}")
+                      print(f"[HIGH] {name}")
                   elif "MEDIUM" in risk:
                       medium_alerts.append(name)
                       print(f"[MEDIUM] {name}")
@@ -173,18 +168,16 @@ jobs:
               print("GATE FAILED: ZAP found HIGH risk alerts.")
               sys.exit(1)
 
-          print("GATE PASSED: No HIGH risk alerts found.")
+          print("GATE PASSED: No HIGH risk alerts.")
           EOF
 
-      # ── Tear down ephemeral environment ───────────────────────────────────
       - name: Tear down environment
         if: always()
         run: |
-          docker compose -f docker-compose.dast.yml down -v
-          rm -f docker-compose.dast.yml .env.test
+          docker compose -f docker-compose.dast.yml down -v 2>/dev/null || true
+          rm -f docker-compose.dast.yml
           echo "Environment torn down"
 
-      # ── Upload artefacts ──────────────────────────────────────────────────
       - name: Upload ZAP report
         if: always()
         uses: actions/upload-artifact@v4
