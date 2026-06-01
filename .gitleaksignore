@@ -1,14 +1,10 @@
 # .gitleaksignore
 # Known findings that are intentionally part of the vulnerable baseline.
 # Each entry is documented with the reason for suppression.
-#
-# Format: fingerprint (file:rule:line)
-
-# .env.example — example placeholder key, not a real credential
-.env.example:aws-access-token:8
+# Note: .env.example and .gitleaksignore are excluded via .gitleaks.toml
 
 # docker-compose.yml — fake AWS example key used for local dev
-# Value: AKIAIOSFODNN7EXAMPLE — this is AWS's own example key from their docs
+# Value: AKIAIOSFODNN7EXAMPLE — AWS's own example key from their docs
 docker-compose.yml:aws-access-token:32
 docker-compose.yml:aws-access-token:51
 

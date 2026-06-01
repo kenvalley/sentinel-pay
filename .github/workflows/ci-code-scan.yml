@@ -37,6 +37,7 @@ jobs:
       - name: Gitleaks — scan repository for secrets
         run: |
           gitleaks detect \
+            --config .gitleaks.toml \
             --source . \
             --redact \
             --exit-code 1 \
