@@ -42,6 +42,7 @@ jobs:
             --exit-code 1 \
             --report-format json \
             --report-path gitleaks-report.json \
+            --gitleaks-ignore-path .gitleaksignore \
             --no-git || {
             echo "GATE FAILED: Gitleaks found secrets in the repository."
             cat gitleaks-report.json
