@@ -1,0 +1,33 @@
+# ci-container-scan.yml
+# Reusable workflow — Container Security Scanning
+# Called by ci-pr-gate.yml on every PR touching services/.
+# Populated fully on Day 17.
+#
+# Steps: Trivy image scan, Cosign keyless signing (V-PIP-01), Syft SBOM (V-PIP-02)
+# Any CRITICAL CVE in the image blocks the PR.
+
+name: CI — Container Security Scan
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write   # required for Cosign keyless signing
+
+jobs:
+  container-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Placeholder — Day 17 wires these steps ────────────────────────────
+      - name: Placeholder — Day 17
+        run: |
+          echo "Container scan gates will be wired on Day 17."
+          echo "Steps: Trivy image scan, Cosign signing, Syft SBOM"
+          exit 0

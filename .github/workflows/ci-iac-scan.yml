@@ -1,0 +1,32 @@
+# ci-iac-scan.yml
+# Reusable workflow — IaC Security Scanning
+# Called by ci-pr-gate.yml on every PR touching infrastructure/.
+# Populated fully on Day 17.
+#
+# Scanners: Checkov, tfsec, OPA/conftest
+# Any HIGH or CRITICAL IaC finding blocks the PR.
+
+name: CI — IaC Security Scan
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  iac-scan:
+    name: IaC Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Placeholder — Day 17 wires these steps ────────────────────────────
+      - name: Placeholder — Day 17
+        run: |
+          echo "IaC scan gates will be wired on Day 17."
+          echo "Scanners: Checkov, tfsec, OPA/conftest"
+          exit 0

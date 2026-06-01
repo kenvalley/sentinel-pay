@@ -1,0 +1,79 @@
+# ci-pr-gate.yml
+# Orchestrator — runs all security gates on every pull request targeting main.
+# A PR cannot merge until all jobs in this workflow pass.
+# Individual scan workflows are called as reusable workflows.
+#
+# Days populated:
+#   Day 15: scaffold + deploy gate
+#   Day 16: code-scan job
+#   Day 17: iac-scan + container-scan jobs
+#   Day 18: dast job
+
+name: CI — PR Security Gate
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+# Cancel in-progress runs for the same PR
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  # ── Code & Dependency Scanning (Day 16) ──────────────────────────────────────
+  code-scan:
+    name: Code & Dependency Scan
+    uses: ./.github/workflows/ci-code-scan.yml
+    secrets: inherit
+
+  # ── IaC Scanning (Day 17) ────────────────────────────────────────────────────
+  iac-scan:
+    name: IaC Security Scan
+    uses: ./.github/workflows/ci-iac-scan.yml
+    secrets: inherit
+
+  # ── Container Scanning (Day 17) ──────────────────────────────────────────────
+  container-scan:
+    name: Container Security Scan
+    uses: ./.github/workflows/ci-container-scan.yml
+    secrets: inherit
+
+  # ── DAST (Day 18) ────────────────────────────────────────────────────────────
+  dast:
+    name: Dynamic Application Security Test
+    uses: ./.github/workflows/ci-dast.yml
+    secrets: inherit
+
+  # ── Gate Summary ─────────────────────────────────────────────────────────────
+  gate-summary:
+    name: Gate Summary
+    runs-on: ubuntu-latest
+    needs: [code-scan, iac-scan, container-scan, dast]
+    if: always()
+    steps:
+      - name: Evaluate gate results
+        run: |
+          echo "### Security Gate Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Code & Dependency Scan | ${{ needs.code-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| IaC Security Scan | ${{ needs.iac-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container Security Scan | ${{ needs.container-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| DAST | ${{ needs.dast.result }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if any gate failed
+        if: |
+          needs.code-scan.result == 'failure' ||
+          needs.iac-scan.result == 'failure' ||
+          needs.container-scan.result == 'failure' ||
+          needs.dast.result == 'failure'
+        run: |
+          echo "One or more security gates failed. PR cannot be merged."
+          exit 1
