@@ -39,9 +39,9 @@ def create_app():
     app.register_blueprint(health_bp)
 
 
-    @app.route("/health")
-    def health():
-        return jsonify({"status": "ok", "service": "payments-api"})
+    # @app.route("/health")
+    # def health():
+    #     return jsonify({"status": "ok", "service": "payments-api"})
 
     
 
