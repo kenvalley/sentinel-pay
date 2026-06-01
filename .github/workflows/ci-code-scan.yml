@@ -1,0 +1,34 @@
+# ci-code-scan.yml
+# Reusable workflow — Code & Dependency Security Scanning
+# Called by ci-pr-gate.yml on every PR.
+# Populated fully on Day 16.
+#
+# Scanners: Gitleaks, Bandit, Semgrep, Trivy (SCA)
+# Severity threshold: CRITICAL and HIGH findings block the PR.
+
+name: CI — Code & Dependency Scan
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  code-scan:
+    name: Code & Dependency Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for Gitleaks
+
+      # ── Placeholder — Day 16 wires these steps ────────────────────────────
+      - name: Placeholder — Day 16
+        run: |
+          echo "Code scan gates will be wired on Day 16."
+          echo "Scanners: Gitleaks, Bandit, Semgrep, Trivy (SCA)"
+          exit 0

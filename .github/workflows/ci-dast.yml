@@ -1,0 +1,33 @@
+# ci-dast.yml
+# Reusable workflow — Dynamic Application Security Testing
+# Called by ci-pr-gate.yml on every PR.
+# Populated fully on Day 18.
+#
+# Tool: OWASP ZAP baseline scan
+# Spins up ephemeral environment, runs ZAP, tears down.
+# Any HIGH risk finding blocks the PR.
+
+name: CI — DAST
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dast:
+    name: DAST — ZAP Baseline Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Placeholder — Day 18 wires these steps ────────────────────────────
+      - name: Placeholder — Day 18
+        run: |
+          echo "DAST gates will be wired on Day 18."
+          echo "Tool: OWASP ZAP baseline scan"
+          exit 0
