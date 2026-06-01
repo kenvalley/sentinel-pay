@@ -348,7 +348,7 @@ resource "aws_db_instance" "main" {
 
   # Engine
   engine         = "postgres"
-  engine_version = "15.5"
+  engine_version = "15"
   instance_class = var.db_instance_class
 
   # Storage
@@ -659,4 +659,67 @@ resource "aws_s3_bucket_policy" "kyc_documents" {
       }
     ]
   })
+}
+
+# ── ALB Access Log Bucket Policy ─────────────────────────────────────────────
+# ALB requires a bucket policy allowing the regional ELB service account.
+# eu-west-2 ELB account ID is 652711504416.
+
+resource "aws_s3_bucket_policy" "audit_alb" {
+  bucket = aws_s3_bucket.audit.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowALBAccessLogs"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::652711504416:root"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.audit.arn}/alb-access-logs/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+      },
+      {
+        Sid    = "AllowCloudTrailWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.audit.arn}/cloudtrail/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        Condition = {
+          StringEquals = {
+            "s3:x-amz-acl" = "bucket-owner-full-control"
+          }
+        }
+      },
+      {
+        Sid    = "AllowCloudTrailAclCheck"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "s3:GetBucketAcl"
+        Resource = aws_s3_bucket.audit.arn
+      },
+      {
+        Sid    = "DenyNonSSLAccess"
+        Effect = "Deny"
+        Principal = "*"
+        Action   = "s3:*"
+        Resource = [
+          aws_s3_bucket.audit.arn,
+          "${aws_s3_bucket.audit.arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      }
+    ]
+  })
+
+  depends_on = [aws_s3_bucket_versioning.audit]
 }

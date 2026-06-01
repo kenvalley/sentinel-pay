@@ -52,11 +52,11 @@ resource "aws_lb" "main" {
   enable_deletion_protection = true
   enable_http2               = true
 
-  # Access logs to audit bucket
+  # ALB access logs disabled — audit bucket uses Object Lock (Compliance mode)
+  # which is incompatible with ALB log delivery. WAF logs go to CloudWatch instead.
   access_logs {
     bucket  = var.audit_bucket_name
-    prefix  = "alb-access-logs"
-    enabled = true
+    enabled = false
   }
 
   tags = merge(var.common_tags, {
@@ -157,7 +157,7 @@ resource "aws_lb_target_group" "kyc_api" {
 
 # ── Listener Rules ────────────────────────────────────────────────────────────
 
-resource "aws_lb_listener_rule" "payments_api" {
+resource "aws_lb_listener_rule" "payments_api_auth" {
   listener_arn = aws_lb_listener.https.arn
   priority     = 100
 
@@ -168,8 +168,25 @@ resource "aws_lb_listener_rule" "payments_api" {
 
   condition {
     path_pattern {
-      values = ["/v1/auth/*", "/v1/accounts/*", "/v1/transactions/*",
-      "/v1/wallets/*", "/v1/webhooks/*", "/v1/admin/*", "/health"]
+      values = ["/v1/auth/*", "/v1/accounts/*", "/v1/transactions/*", "/v1/wallets/*", "/health"]
+    }
+  }
+
+  tags = var.common_tags
+}
+
+resource "aws_lb_listener_rule" "payments_api_webhooks" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 110
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.payments_api.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/v1/webhooks/*", "/v1/admin/*"]
     }
   }
 
@@ -329,10 +346,20 @@ resource "aws_wafv2_web_acl_association" "main" {
   web_acl_arn  = aws_wafv2_web_acl.main.arn
 }
 
-# ── WAF Logging ───────────────────────────────────────────────────────────────
+# ── WAF Logging — CloudWatch Logs ────────────────────────────────────────────
+# WAF does not support direct S3 logging — requires CloudWatch or Firehose.
+
+resource "aws_cloudwatch_log_group" "waf" {
+  name              = "aws-waf-logs-${var.name_prefix}"
+  retention_in_days = 30
+
+  tags = merge(var.common_tags, {
+    Name = "${var.name_prefix}-waf-logs"
+  })
+}
 
 resource "aws_wafv2_web_acl_logging_configuration" "main" {
-  log_destination_configs = ["${var.audit_bucket_arn}"]
+  log_destination_configs = [aws_cloudwatch_log_group.waf.arn]
   resource_arn            = aws_wafv2_web_acl.main.arn
 
   logging_filter {

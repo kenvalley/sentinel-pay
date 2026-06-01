@@ -7,7 +7,7 @@ data "aws_region" "current" {}
 
 resource "aws_iam_role" "payments_api_task" {
   name        = "${var.name_prefix}-payments-api-task-role"
-  description = "ECS task role for payments-api — least privilege"
+  description = "ECS task role for payments-api - least privilege"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -77,7 +77,7 @@ resource "aws_iam_role_policy_attachment" "payments_api_execution" {
 
 resource "aws_iam_role" "kyc_api_task" {
   name        = "${var.name_prefix}-kyc-api-task-role"
-  description = "ECS task role for kyc-api — least privilege"
+  description = "ECS task role for kyc-api - least privilege"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -182,7 +182,7 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
 
 resource "aws_iam_role" "github_actions_deploy" {
   name        = "${var.name_prefix}-github-actions-deploy-role"
-  description = "GitHub Actions deployment role — least privilege, no AdministratorAccess"
+  description = "GitHub Actions deployment role - least privilege, no AdministratorAccess"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

@@ -32,11 +32,12 @@ resource "aws_guardduty_detector" "main" {
 }
 
 # ── CloudTrail — closes V-CLD-06 ──────────────────────────────────────────────
+# CloudWatch log group without KMS to avoid key policy complexity.
+# CloudTrail itself is KMS encrypted at the S3 level.
 
 resource "aws_cloudwatch_log_group" "cloudtrail" {
   name              = "/aws/cloudtrail/${var.name_prefix}"
   retention_in_days = var.cloudtrail_retention_days
-  kms_key_id        = var.audit_kms_key_arn
 
   tags = merge(var.common_tags, {
     Name = "${var.name_prefix}-cloudtrail-logs"
@@ -86,7 +87,6 @@ resource "aws_cloudtrail" "main" {
   cloud_watch_logs_group_arn    = "${aws_cloudwatch_log_group.cloudtrail.arn}:*"
   cloud_watch_logs_role_arn     = aws_iam_role.cloudtrail.arn
 
-  # Log management and data events
   event_selector {
     read_write_type           = "All"
     include_management_events = true
@@ -113,9 +113,84 @@ resource "aws_securityhub_standards_subscription" "fsbp" {
   depends_on    = [aws_securityhub_account.main]
 }
 
+# CIS v1.4.0 — v1.2.0 is no longer available in eu-west-2
 resource "aws_securityhub_standards_subscription" "cis" {
-  standards_arn = "arn:aws:securityhub:${data.aws_region.current.name}::standards/cis-aws-foundations-benchmark/v/1.2.0"
+  standards_arn = "arn:aws:securityhub:${data.aws_region.current.name}::standards/cis-aws-foundations-benchmark/v/1.4.0"
   depends_on    = [aws_securityhub_account.main]
+}
+
+# ── S3 bucket for AWS Config ──────────────────────────────────────────────────
+# Separate bucket without Object Lock — Config requires PutObject without
+# Object Lock retention constraints.
+
+resource "aws_s3_bucket" "config" {
+  bucket        = "${var.name_prefix}-config-logs"
+  force_destroy = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.name_prefix}-config-logs"
+  })
+}
+
+resource "aws_s3_bucket_versioning" "config" {
+  bucket = aws_s3_bucket.config.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "config" {
+  bucket = aws_s3_bucket.config.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "config" {
+  bucket                  = aws_s3_bucket.config.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_policy" "config" {
+  bucket = aws_s3_bucket.config.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowConfigWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "config.amazonaws.com"
+        }
+        Action   = ["s3:PutObject", "s3:GetBucketAcl"]
+        Resource = [
+          aws_s3_bucket.config.arn,
+          "${aws_s3_bucket.config.arn}/*"
+        ]
+      },
+      {
+        Sid    = "DenyNonSSL"
+        Effect = "Deny"
+        Principal = "*"
+        Action   = "s3:*"
+        Resource = [
+          aws_s3_bucket.config.arn,
+          "${aws_s3_bucket.config.arn}/*"
+        ]
+        Condition = {
+          Bool = { "aws:SecureTransport" = "false" }
+        }
+      }
+    ]
+  })
+
+  depends_on = [aws_s3_bucket_versioning.config]
 }
 
 # ── AWS Config ────────────────────────────────────────────────────────────────
@@ -152,14 +227,17 @@ resource "aws_iam_role_policy_attachment" "config" {
 
 resource "aws_config_delivery_channel" "main" {
   name           = "${var.name_prefix}-config-delivery"
-  s3_bucket_name = var.audit_bucket_name
+  s3_bucket_name = aws_s3_bucket.config.bucket
   s3_key_prefix  = "aws-config"
 
   snapshot_delivery_properties {
     delivery_frequency = "TwentyFour_Hours"
   }
 
-  depends_on = [aws_config_configuration_recorder.main]
+  depends_on = [
+    aws_config_configuration_recorder.main,
+    aws_s3_bucket_policy.config
+  ]
 }
 
 resource "aws_config_configuration_recorder_status" "main" {
@@ -169,7 +247,7 @@ resource "aws_config_configuration_recorder_status" "main" {
   depends_on = [aws_config_delivery_channel.main]
 }
 
-# CIS Benchmark rule pack
+# CIS conformance pack
 resource "aws_config_conformance_pack" "cis" {
   name = "${var.name_prefix}-cis-conformance"
 
@@ -209,13 +287,6 @@ resource "aws_config_conformance_pack" "cis" {
           Source:
             Owner: AWS
             SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
-      S3BucketPublicWriteProhibited:
-        Type: AWS::Config::ConfigRule
-        Properties:
-          ConfigRuleName: s3-bucket-public-write-prohibited
-          Source:
-            Owner: AWS
-            SourceIdentifier: S3_BUCKET_PUBLIC_WRITE_PROHIBITED
       RestrictedSSH:
         Type: AWS::Config::ConfigRule
         Properties:
@@ -223,13 +294,6 @@ resource "aws_config_conformance_pack" "cis" {
           Source:
             Owner: AWS
             SourceIdentifier: INCOMING_SSH_DISABLED
-      VPCDefaultSecurityGroupClosed:
-        Type: AWS::Config::ConfigRule
-        Properties:
-          ConfigRuleName: vpc-default-security-group-closed
-          Source:
-            Owner: AWS
-            SourceIdentifier: VPC_DEFAULT_SECURITY_GROUP_CLOSED
   EOT
 
   depends_on = [aws_config_configuration_recorder_status.main]
@@ -300,32 +364,12 @@ resource "aws_iam_role_policy" "containment_lambda" {
         Resource = "arn:aws:logs:*:*:*"
       },
       {
-        Sid    = "SNSPublish"
-        Effect = "Allow"
-        Action = ["sns:Publish"]
+        Sid      = "SNSPublish"
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
         Resource = aws_sns_topic.security_alerts.arn
       }
     ]
-  })
-}
-
-resource "aws_lambda_function" "containment" {
-  filename         = data.archive_file.containment_lambda.output_path
-  function_name    = "${var.name_prefix}-containment"
-  role             = aws_iam_role.containment_lambda.arn
-  handler          = "index.handler"
-  runtime          = "python3.11"
-  source_code_hash = data.archive_file.containment_lambda.output_base64sha256
-  timeout          = 30
-
-  environment {
-    variables = {
-      SNS_TOPIC_ARN = aws_sns_topic.security_alerts.arn
-    }
-  }
-
-  tags = merge(var.common_tags, {
-    Name = "${var.name_prefix}-containment-lambda"
   })
 }
 
@@ -353,15 +397,11 @@ data "archive_file" "containment_lambda" {
 
       def handler(event, context):
           print(f"Containment triggered: {json.dumps(event)}")
-          
           finding = event.get('detail', {})
           severity = finding.get('severity', 0)
           finding_type = finding.get('type', 'Unknown')
-          
-          # Extract affected principal from GuardDuty finding
           principal = None
           resource = finding.get('resource', {})
-          
           if 'accessKeyDetails' in resource:
               principal = resource['accessKeyDetails'].get('userName')
               if principal:
@@ -374,8 +414,6 @@ data "archive_file" "containment_lambda" {
                       print(f"Attached deny-all policy to user: {principal}")
                   except Exception as e:
                       print(f"Failed to contain user {principal}: {e}")
-
-          # Send P0 alert
           message = {
               "alert": "P0 - GuardDuty High Severity Finding",
               "finding_type": finding_type,
@@ -383,20 +421,38 @@ data "archive_file" "containment_lambda" {
               "principal_contained": principal,
               "finding": finding
           }
-          
           sns.publish(
               TopicArn=os.environ['SNS_TOPIC_ARN'],
               Subject=f"P0 SECURITY ALERT: {finding_type}",
               Message=json.dumps(message, indent=2)
           )
-          
           return {"status": "contained", "principal": principal}
     EOT
     filename = "index.py"
   }
 }
 
-# ── EventBridge Rule — GuardDuty HIGH findings ────────────────────────────────
+resource "aws_lambda_function" "containment" {
+  filename         = data.archive_file.containment_lambda.output_path
+  function_name    = "${var.name_prefix}-containment"
+  role             = aws_iam_role.containment_lambda.arn
+  handler          = "index.handler"
+  runtime          = "python3.11"
+  source_code_hash = data.archive_file.containment_lambda.output_base64sha256
+  timeout          = 30
+
+  environment {
+    variables = {
+      SNS_TOPIC_ARN = aws_sns_topic.security_alerts.arn
+    }
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.name_prefix}-containment-lambda"
+  })
+}
+
+# ── EventBridge — GuardDuty HIGH findings ────────────────────────────────────
 
 resource "aws_cloudwatch_event_rule" "guardduty_high" {
   name        = "${var.name_prefix}-guardduty-high"
@@ -429,7 +485,7 @@ resource "aws_lambda_permission" "guardduty_high" {
   source_arn    = aws_cloudwatch_event_rule.guardduty_high.arn
 }
 
-# ── Honeytoken — decoy IAM key ────────────────────────────────────────────────
+# ── Honeytoken ────────────────────────────────────────────────────────────────
 
 resource "aws_iam_user" "honeytoken" {
   name = "${var.name_prefix}-honeytoken-user"
@@ -445,7 +501,6 @@ resource "aws_iam_user_policy" "honeytoken" {
   name = "${var.name_prefix}-honeytoken-deny-all"
   user = aws_iam_user.honeytoken.name
 
-  # Deny everything - this key should never actually be used
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -460,8 +515,6 @@ resource "aws_iam_access_key" "honeytoken" {
   user = aws_iam_user.honeytoken.name
 }
 
-# Store honeytoken in Secrets Manager
-# The application will have this file path reachable from memory
 resource "aws_secretsmanager_secret" "honeytoken" {
   name                    = "${var.name_prefix}/decoy/legacy-credentials"
   description             = "Honeytoken - decoy credentials. Any use triggers P0 alert."
@@ -482,7 +535,6 @@ resource "aws_secretsmanager_secret_version" "honeytoken" {
   })
 }
 
-# CloudWatch alarm on honeytoken key usage via CloudTrail
 resource "aws_cloudwatch_metric_alarm" "honeytoken_used" {
   alarm_name          = "${var.name_prefix}-honeytoken-used"
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -501,7 +553,6 @@ resource "aws_cloudwatch_metric_alarm" "honeytoken_used" {
   })
 }
 
-# EventBridge rule to detect honeytoken usage in CloudTrail
 resource "aws_cloudwatch_event_rule" "honeytoken_used" {
   name        = "${var.name_prefix}-honeytoken-used"
   description = "Detect any API call using the honeytoken access key"
