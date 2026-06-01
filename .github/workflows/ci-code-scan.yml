@@ -81,12 +81,15 @@ jobs:
       - name: Bandit — evaluate results
         run: |
           python3 << 'EOF'
-          import json, sys
+          import json, sys, os
 
           total_high = 0
           total_critical = 0
 
           for fname in ["bandit-payments.json", "bandit-kyc.json"]:
+              if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+                  print(f"{fname}: no findings or file empty")
+                  continue
               try:
                   data = json.load(open(fname))
                   results = data.get("results", [])
@@ -98,8 +101,8 @@ jobs:
                       elif sev == "CRITICAL":
                           total_critical += 1
                           print(f"[CRITICAL] {r['test_id']}: {r['issue_text']} at {r['filename']}:{r['line_number']}")
-              except FileNotFoundError:
-                  pass
+              except (json.JSONDecodeError, FileNotFoundError) as e:
+                  print(f"{fname}: could not parse ({e})")
 
           print(f"\nBandit summary: {total_critical} critical, {total_high} high")
 
@@ -137,19 +140,22 @@ jobs:
       - name: Semgrep — evaluate results
         run: |
           python3 << 'EOF'
-          import json, sys
+          import json, sys, os
 
           total = 0
 
           for fname in ["semgrep-standard.json", "semgrep-regression.json"]:
+              if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+                  print(f"{fname}: no findings or file empty")
+                  continue
               try:
                   data = json.load(open(fname))
                   results = data.get("results", [])
                   for r in results:
                       total += 1
                       print(f"[FAIL] {r['check_id']}: {r['extra']['message']} at {r['path']}:{r['start']['line']}")
-              except FileNotFoundError:
-                  pass
+              except (json.JSONDecodeError, FileNotFoundError) as e:
+                  print(f"{fname}: could not parse ({e})")
 
           print(f"\nSemgrep summary: {total} ERROR-level findings")
 
