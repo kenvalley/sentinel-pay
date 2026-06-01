@@ -1,7 +1,6 @@
 # ci-code-scan.yml
 # Reusable workflow — Code & Dependency Security Scanning
 # Called by ci-pr-gate.yml on every PR.
-# Populated fully on Day 16.
 #
 # Scanners: Gitleaks, Bandit, Semgrep, Trivy (SCA)
 # Severity threshold: CRITICAL and HIGH findings block the PR.
@@ -24,11 +23,172 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history needed for Gitleaks
+          fetch-depth: 0
 
-      # ── Placeholder — Day 16 wires these steps ────────────────────────────
-      - name: Placeholder — Day 16
+      # ── Gitleaks — secret scanning ────────────────────────────────────────
+      - name: Gitleaks — scan for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: detect --source . --redact --no-git --exit-code 1
+
+      # ── Bandit — Python security patterns ────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: pip install bandit[toml]==1.7.8
+
+      - name: Bandit — scan payments-api
         run: |
-          echo "Code scan gates will be wired on Day 16."
-          echo "Scanners: Gitleaks, Bandit, Semgrep, Trivy (SCA)"
-          exit 0
+          bandit -r services/payments-api/app \
+            --configfile .bandit \
+            --severity-level high \
+            --confidence-level medium \
+            --format json \
+            --output bandit-payments.json || true
+
+      - name: Bandit — scan kyc-api
+        run: |
+          bandit -r services/kyc-api/app \
+            --configfile .bandit \
+            --severity-level high \
+            --confidence-level medium \
+            --format json \
+            --output bandit-kyc.json || true
+
+      - name: Bandit — evaluate results
+        run: |
+          python3 << 'EOF'
+          import json, sys
+
+          total_high = 0
+          total_critical = 0
+
+          for fname in ["bandit-payments.json", "bandit-kyc.json"]:
+              try:
+                  data = json.load(open(fname))
+                  results = data.get("results", [])
+                  for r in results:
+                      sev = r.get("issue_severity", "").upper()
+                      if sev == "HIGH":
+                          total_high += 1
+                          print(f"[HIGH] {r['test_id']}: {r['issue_text']} at {r['filename']}:{r['line_number']}")
+                      elif sev == "CRITICAL":
+                          total_critical += 1
+                          print(f"[CRITICAL] {r['test_id']}: {r['issue_text']} at {r['filename']}:{r['line_number']}")
+              except FileNotFoundError:
+                  pass
+
+          print(f"\nBandit summary: {total_critical} critical, {total_high} high")
+
+          if total_critical > 0 or total_high > 0:
+              print("GATE FAILED: Bandit found HIGH or CRITICAL findings.")
+              sys.exit(1)
+
+          print("GATE PASSED: No HIGH or CRITICAL findings.")
+          EOF
+
+      # ── Semgrep — logic-level scanning + custom regression rules ─────────
+      - name: Install Semgrep
+        run: pip install semgrep==1.75.0
+
+      - name: Semgrep — standard Python rules
+        run: |
+          semgrep scan \
+            --config p/python \
+            --config p/flask \
+            --config p/jwt \
+            --severity ERROR \
+            --json \
+            --output semgrep-standard.json \
+            services/ || true
+
+      - name: Semgrep — custom regression rules
+        run: |
+          semgrep scan \
+            --config .github/semgrep/regression-rules.yml \
+            --severity ERROR \
+            --json \
+            --output semgrep-regression.json \
+            services/ || true
+
+      - name: Semgrep — evaluate results
+        run: |
+          python3 << 'EOF'
+          import json, sys
+
+          total = 0
+
+          for fname in ["semgrep-standard.json", "semgrep-regression.json"]:
+              try:
+                  data = json.load(open(fname))
+                  results = data.get("results", [])
+                  for r in results:
+                      total += 1
+                      print(f"[FAIL] {r['check_id']}: {r['extra']['message']} at {r['path']}:{r['start']['line']}")
+              except FileNotFoundError:
+                  pass
+
+          print(f"\nSemgrep summary: {total} ERROR-level findings")
+
+          if total > 0:
+              print("GATE FAILED: Semgrep found ERROR-level findings.")
+              sys.exit(1)
+
+          print("GATE PASSED: No ERROR-level findings.")
+          EOF
+
+      # ── Trivy SCA — dependency CVE scanning ──────────────────────────────
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -qq && sudo apt-get install -y trivy
+
+      - name: Trivy — scan payments-api dependencies
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output trivy-payments.json \
+            services/payments-api/requirements.txt || echo "TRIVY_PAYMENTS_FAILED=true" >> $GITHUB_ENV
+
+      - name: Trivy — scan kyc-api dependencies
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output trivy-kyc.json \
+            services/kyc-api/requirements.txt || echo "TRIVY_KYC_FAILED=true" >> $GITHUB_ENV
+
+      - name: Trivy — evaluate results
+        run: |
+          if [ "$TRIVY_PAYMENTS_FAILED" = "true" ] || [ "$TRIVY_KYC_FAILED" = "true" ]; then
+            echo "GATE FAILED: Trivy found CRITICAL CVEs in dependencies."
+            exit 1
+          fi
+          echo "GATE PASSED: No CRITICAL CVEs found."
+
+      # ── Upload scan artefacts ─────────────────────────────────────────────
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-scan-results-${{ github.run_id }}
+          path: |
+            bandit-payments.json
+            bandit-kyc.json
+            semgrep-standard.json
+            semgrep-regression.json
+            trivy-payments.json
+            trivy-kyc.json
+          retention-days: 30

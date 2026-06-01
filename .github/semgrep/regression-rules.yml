@@ -1,0 +1,112 @@
+# regression-rules.yml
+# Custom Semgrep rules that act as regression tests for all V-APP fixes.
+# If any of these fire, it means a fix has been reverted or bypassed.
+# Each rule maps directly to a V-APP identifier.
+
+rules:
+
+  # V-APP-01 — SQL Injection regression
+  - id: sentinelpay-v-app-01-sql-injection
+    patterns:
+      - pattern: |
+          $QUERY = "..." + $VAR + "..."
+      - pattern-inside: |
+          def $FUNC(...):
+            ...
+            $CUR.execute($QUERY, ...)
+            ...
+    message: |
+      V-APP-01 REGRESSION: Raw string concatenation in SQL query detected.
+      Use parameterised queries with %s placeholders instead of string formatting.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      v_id: V-APP-01
+      category: injection
+
+  # V-APP-01 — f-string SQL injection
+  - id: sentinelpay-v-app-01-fstring-sql
+    patterns:
+      - pattern: $CUR.execute(f"...", ...)
+      - pattern: $CUR.execute(f'...', ...)
+    message: |
+      V-APP-01 REGRESSION: f-string used in SQL query — SQL injection risk.
+      Use parameterised queries with %s placeholders.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      v_id: V-APP-01
+      category: injection
+
+  # V-APP-02 — JWT algorithm:none regression
+  - id: sentinelpay-v-app-02-jwt-alg-none
+    patterns:
+      - pattern: jwt.decode(..., algorithms=[..., "none", ...], ...)
+      - pattern: jwt.decode(..., options={"verify_signature": False}, ...)
+    message: |
+      V-APP-02 REGRESSION: JWT decoded with alg:none or verification disabled.
+      Use RS256 with mandatory signature verification.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      v_id: V-APP-02
+      category: authn
+
+  # V-APP-02 — Weak JWT algorithm
+  - id: sentinelpay-v-app-02-jwt-hs256
+    pattern: jwt.encode(..., algorithm="HS256")
+    message: |
+      V-APP-02 REGRESSION: JWT signed with HS256 (symmetric).
+      Use RS256 with a private key stored in Secrets Manager.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      v_id: V-APP-02
+      category: authn
+
+  # V-APP-06 — MD5 password hashing regression
+  - id: sentinelpay-v-app-06-md5-password
+    patterns:
+      - pattern: hashlib.md5($PASSWORD.encode())
+      - pattern: hashlib.md5($PASSWORD)
+    message: |
+      V-APP-06 REGRESSION: MD5 used for password hashing.
+      Use Argon2id via the argon2-cffi library.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      v_id: V-APP-06
+      category: cryptography
+
+  # V-APP-10 — Pickle deserialisation regression
+  - id: sentinelpay-v-app-10-pickle-loads
+    patterns:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+    message: |
+      V-APP-10 REGRESSION: pickle.loads() detected — arbitrary code execution risk.
+      Use json.loads() with jsonschema validation instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      v_id: V-APP-10
+      category: deserialization
+
+  # V-APP-04 — SSRF regression
+  - id: sentinelpay-v-app-04-unvalidated-url
+    patterns:
+      - pattern: requests.get($URL, ...)
+      - pattern: requests.post($URL, ...)
+    pattern-not-inside: |
+      $URL = validate_callback_url(...)
+      ...
+    pattern-not: requests.get("...", ...)
+    pattern-not: requests.post("...", ...)
+    message: |
+      V-APP-04 REGRESSION: requests called with dynamic URL not validated by validate_callback_url().
+      All outbound HTTP calls with user-supplied URLs must pass through the SSRF guard.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      v_id: V-APP-04
+      category: ssrf
