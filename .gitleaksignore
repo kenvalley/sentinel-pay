@@ -12,3 +12,8 @@ docker-compose.yml:aws-access-token:51
 # Documented in Day 3 Gitleaks scan report. Key is rotated/invalid.
 scripts/legacy_deploy.sh:aws-access-token:10
 scripts/legacy_deploy.sh:slack-webhook-url:18
+
+# ci-dast.yml — contains AKIAIOSFODNN7EXAMPLE (AWS docs example key)
+# used as placeholder credentials for local DAST environment only
+.github/workflows/ci-dast.yml:aws-access-token:33
+.github/workflows/ci-dast.yml:aws-access-token:76
