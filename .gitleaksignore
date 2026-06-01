@@ -16,4 +16,4 @@ scripts/legacy_deploy.sh:slack-webhook-url:18
 # ci-dast.yml — contains AKIAIOSFODNN7EXAMPLE (AWS docs example key)
 # used as placeholder credentials for local DAST environment only
 .github/workflows/ci-dast.yml:aws-access-token:33
-.github/workflows/ci-dast.yml:aws-access-token:76
+.github/workflows/ci-dast.yml:aws-access-token:61
