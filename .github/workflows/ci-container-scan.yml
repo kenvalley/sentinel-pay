@@ -55,6 +55,7 @@ jobs:
           trivy image \
             --scanners vuln \
             --severity CRITICAL \
+            --ignorefile .trivyignore \
             --exit-code 0 \
             --format json \
             --output trivy-image-${{ matrix.service.name }}.json \
