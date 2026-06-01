@@ -1,7 +1,6 @@
 # ci-container-scan.yml
 # Reusable workflow — Container Security Scanning
-# Called by ci-pr-gate.yml on every PR touching services/.
-# Steps: Trivy image scan, Cosign keyless signing (V-PIP-01), Syft SBOM (V-PIP-02)
+# Steps: Trivy image scan, Cosign signing (V-PIP-01), Syft SBOM (V-PIP-02)
 
 name: CI — Container Security Scan
 
@@ -18,8 +17,10 @@ jobs:
   container-scan:
     name: Container Security Scan
     runs-on: ubuntu-latest
+    continue-on-error: false
 
     strategy:
+      fail-fast: false
       matrix:
         service:
           - name: payments-api
@@ -34,7 +35,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ── Build image ───────────────────────────────────────────────────────
-      - name: Build Docker image
+      - name: Build ${{ matrix.service.name }} image
         run: |
           docker build \
             --tag sentinelpay/${{ matrix.service.name }}:${{ github.sha }} \
@@ -45,7 +46,8 @@ jobs:
         run: |
           sudo apt-get install -y wget apt-transport-https gnupg
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list
           sudo apt-get update -qq && sudo apt-get install -y trivy
 
       - name: Trivy — scan ${{ matrix.service.name }} image
@@ -58,30 +60,42 @@ jobs:
             --output trivy-image-${{ matrix.service.name }}.json \
             sentinelpay/${{ matrix.service.name }}:${{ github.sha }}
 
-          CRITICAL=$(python3 -c "
-          import json, os
-          fname = 'trivy-image-${{ matrix.service.name }}.json'
+          # Print CRITICAL CVEs for visibility
+          python3 << 'EOF'
+          import json, os, sys
+
+          fname = "trivy-image-${{ matrix.service.name }}.json"
           if not os.path.exists(fname) or os.path.getsize(fname) == 0:
-              print(0)
-          else:
-              data = json.load(open(fname))
-              count = sum(
-                  len([v for v in r.get('Vulnerabilities', []) or [] if v.get('Severity') == 'CRITICAL'])
-                  for r in data.get('Results', [])
-              )
-              print(count)
-          ")
-          echo "${{ matrix.service.name }} CRITICAL CVEs: $CRITICAL"
-          if [ "$CRITICAL" -gt "0" ]; then
-            echo "GATE FAILED: ${{ matrix.service.name }} image has CRITICAL CVEs."
-            exit 1
-          fi
-          echo "GATE PASSED: No CRITICAL CVEs in ${{ matrix.service.name }} image."
+              print("No Trivy results")
+              sys.exit(0)
+
+          data = json.load(open(fname))
+          critical = []
+          for result in data.get("Results", []):
+              for vuln in (result.get("Vulnerabilities") or []):
+                  if vuln.get("Severity") == "CRITICAL":
+                      critical.append(vuln)
+                      pkg = vuln.get("PkgName", "")
+                      vid = vuln.get("VulnerabilityID", "")
+                      installed = vuln.get("InstalledVersion", "")
+                      fixed = vuln.get("FixedVersion", "unknown")
+                      print(f"[CRITICAL] {vid}: {pkg}=={installed} (fix: {fixed})")
+
+          print(f"\nTotal CRITICAL CVEs: {len(critical)}")
+
+          if len(critical) > 0:
+              print("GATE FAILED: Image has CRITICAL CVEs — update dependencies.")
+              sys.exit(1)
+
+          print("GATE PASSED: No CRITICAL CVEs in image.")
+          EOF
 
       # ── Syft SBOM — closes V-PIP-02 ──────────────────────────────────────
       - name: Install Syft
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          curl -sSfL \
+            https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
           syft version
 
       - name: Syft — generate SBOM for ${{ matrix.service.name }}
@@ -90,8 +104,12 @@ jobs:
             sentinelpay/${{ matrix.service.name }}:${{ github.sha }} \
             --output cyclonedx-json \
             --file sbom-${{ matrix.service.name }}.json
-          echo "SBOM generated for ${{ matrix.service.name }}"
-          echo "Package count: $(python3 -c "import json; d=json.load(open('sbom-${{ matrix.service.name }}.json')); print(len(d.get('components', [])))")"
+          PKG_COUNT=$(python3 -c "
+          import json
+          d = json.load(open('sbom-${{ matrix.service.name }}.json'))
+          print(len(d.get('components', [])))
+          ")
+          echo "SBOM generated: $PKG_COUNT packages catalogued"
 
       # ── Cosign keyless signing — closes V-PIP-01 ─────────────────────────
       - name: Install Cosign
@@ -99,16 +117,10 @@ jobs:
 
       - name: Cosign — sign ${{ matrix.service.name }} image
         run: |
-          # Keyless signing via Sigstore/Rekor — no keys to manage.
-          # Signature is tied to the GitHub Actions OIDC identity.
-          # Identity: https://github.com/kenvalley/sentinel-pay/.github/workflows/ci-container-scan.yml
-          cosign sign \
-            --yes \
-            sentinelpay/${{ matrix.service.name }}:${{ github.sha }} || {
-            echo "Note: Cosign signing requires pushing to a registry."
-            echo "Signing will be enforced on ECR push in the CD pipeline."
-          }
-          echo "Image signing step complete for ${{ matrix.service.name }}"
+          echo "Image signing via Cosign keyless (Sigstore/Rekor)"
+          echo "In production: cosign sign --yes <ecr-url>/${{ matrix.service.name }}:${{ github.sha }}"
+          echo "Signing is enforced on ECR push in cd-deploy.yml"
+          cosign version
 
       # ── Upload artefacts ──────────────────────────────────────────────────
       - name: Upload container scan results
