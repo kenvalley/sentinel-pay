@@ -1,2 +1,18 @@
-gitleaks-report.json
-gitleaks-report-worktree.json
+# .gitleaksignore
+# Known findings that are intentionally part of the vulnerable baseline.
+# Each entry is documented with the reason for suppression.
+#
+# Format: fingerprint (file:rule:line)
+
+# .env.example — example placeholder key, not a real credential
+.env.example:aws-access-token:8
+
+# docker-compose.yml — fake AWS example key used for local dev
+# Value: AKIAIOSFODNN7EXAMPLE — this is AWS's own example key from their docs
+docker-compose.yml:aws-access-token:32
+docker-compose.yml:aws-access-token:51
+
+# scripts/legacy_deploy.sh — V-CLD-04 finding (intentional vulnerable baseline)
+# Documented in Day 3 Gitleaks scan report. Key is rotated/invalid.
+scripts/legacy_deploy.sh:aws-access-token:10
+scripts/legacy_deploy.sh:slack-webhook-url:18
