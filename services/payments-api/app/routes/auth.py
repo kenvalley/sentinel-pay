@@ -12,7 +12,8 @@ from pydantic import ValidationError
 from app.db import get_connection
 from app.auth import hash_password, verify_password, issue_token
 from app.schemas import RegisterSchema
-from app.main import limiter
+from app.limiter import limiter
+
 
 auth_bp = Blueprint("auth", __name__)
 
