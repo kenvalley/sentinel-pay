@@ -12,7 +12,7 @@ from app.routes.admin import admin_bp
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-
+from app.routes.health import health_bp
 
 limiter = Limiter(
     key_func=get_remote_address,
@@ -35,6 +35,8 @@ def create_app():
     app.register_blueprint(wallets_bp, url_prefix="/v1/wallets")
     app.register_blueprint(webhooks_bp, url_prefix="/v1/webhooks")
     app.register_blueprint(admin_bp, url_prefix="/v1/admin")
+    app.register_blueprint(health_bp)
+
 
     @app.route("/health")
     def health():

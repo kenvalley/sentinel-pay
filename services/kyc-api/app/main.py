@@ -5,6 +5,8 @@ from flask import Flask, jsonify
 from app.routes.verify import verify_bp
 from app.routes.documents import documents_bp
 
+from app.routes.health import health_bp
+
 
 def create_app():
     app = Flask(__name__)
@@ -12,6 +14,8 @@ def create_app():
 
     app.register_blueprint(verify_bp, url_prefix="/v1/verify")
     app.register_blueprint(documents_bp, url_prefix="/v1/documents")
+    app.register_blueprint(health_bp)
+
 
     @app.route("/health")
     def health():
