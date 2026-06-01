@@ -1,0 +1,23 @@
+# ZAP baseline scan rules
+# Format: rule-id	IGNORE/WARN/FAIL	description
+# IGNORE = suppress entirely
+# WARN = report but do not fail
+# FAIL = fail the build
+
+# Application Error Disclosure — acceptable in dev/DAST context
+10023	IGNORE	Information Disclosure - Debug Error Messages
+
+# Cookie without Secure flag — acceptable since DAST runs over HTTP locally
+10011	IGNORE	Cookie Without Secure Flag
+
+# Cookie without SameSite — flask default, not a blocker
+10054	IGNORE	Cookie without SameSite Attribute
+
+# Missing HTTPS — DAST runs over HTTP locally, HTTPS enforced at ALB
+10035	IGNORE	Strict-Transport-Security Header Not Set
+
+# CSP missing — addressed at ALB/WAF level
+10038	IGNORE	Content Security Policy (CSP) Header Not Set
+
+# X-Frame-Options — set at ALB level
+10020	IGNORE	Missing Anti-clickjacking Header
