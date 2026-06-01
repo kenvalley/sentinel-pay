@@ -9,16 +9,17 @@ from app.routes.webhooks import webhooks_bp
 from app.routes.admin import admin_bp
 
 # ADDED!
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+# from flask_limiter import Limiter
+# from flask_limiter.util import get_remote_address
+from app.limiter import limiter
 
 from app.routes.health import health_bp
 
-limiter = Limiter(
-    key_func=get_remote_address,
-    storage_uri=os.environ.get("REDIS_URL", "redis://redis:6379/0"),
-    default_limits=[]
-)
+# limiter = Limiter(
+#     key_func=get_remote_address,
+#     storage_uri=os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+#     default_limits=[]
+# )
 
 
 # FIXED: Added error handler for uncaught exceptions to prevent verbose stack traces from being exposed in responses.
