@@ -447,11 +447,11 @@ resource "aws_elasticache_replication_group" "main" {
 # Compliance mode Object Lock - logs cannot be deleted
 
 resource "aws_s3_bucket" "audit" {
-  bucket        = "${var.name_prefix}-audit-logs"
+  bucket        = "${var.name_prefix}-audit-logs-2"
   force_destroy = false
 
   tags = merge(var.common_tags, {
-    Name = "${var.name_prefix}-audit-logs"
+    Name = "${var.name_prefix}-audit-logs-2"
   })
 }
 
