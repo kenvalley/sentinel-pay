@@ -14,3 +14,4 @@ argon2-cffi==23.1.0 # ADDED!
 pydantic==2.7.0 # ADDED!
 flask-limiter==3.8.0  # ADDED! For rate limiting to enhance security against brute-force attacks and abuse.
 werkzeug==2.0.3 # ADDED! Updated Werkzeug to ensure compatibility with Flask 2.0.1 and to benefit from the latest security patches and performance improvements.
+requests==2.3.0
