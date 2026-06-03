@@ -39,10 +39,8 @@ resource "aws_ecr_repository" "kyc_api" {
   })
 }
 
-# ECR lifecycle policies - keep last 10 images
 resource "aws_ecr_lifecycle_policy" "payments_api" {
   repository = aws_ecr_repository.payments_api.name
-
   policy = jsonencode({
     rules = [{
       rulePriority = 1
@@ -59,7 +57,6 @@ resource "aws_ecr_lifecycle_policy" "payments_api" {
 
 resource "aws_ecr_lifecycle_policy" "kyc_api" {
   repository = aws_ecr_repository.kyc_api.name
-
   policy = jsonencode({
     rules = [{
       rulePriority = 1
@@ -139,7 +136,6 @@ resource "aws_ecs_task_definition" "payments_api" {
       protocol      = "tcp"
     }]
 
-    # Secrets from Secrets Manager - never in environment variables
     secrets = [
       {
         name      = "DATABASE_URL"
@@ -159,7 +155,6 @@ resource "aws_ecs_task_definition" "payments_api" {
       }
     ]
 
-    # Non-sensitive environment variables only
     environment = [
       {
         name  = "ENVIRONMENT"
@@ -171,7 +166,7 @@ resource "aws_ecs_task_definition" "payments_api" {
       }
     ]
 
-    # Security hardening
+    # Read-only root filesystem with tmpfs for /tmp (Fargate compatible)
     readonlyRootFilesystem = true
     user                   = "1001:1001"
 
@@ -179,6 +174,10 @@ resource "aws_ecs_task_definition" "payments_api" {
       capabilities = {
         drop = ["ALL"]
       }
+      tmpfs = [{
+        containerPath = "/tmp"
+        size          = 64
+      }]
     }
 
     logConfiguration = {
@@ -237,10 +236,6 @@ resource "aws_ecs_task_definition" "kyc_api" {
         name      = "JWT_PUBLIC_KEY"
         valueFrom = var.jwt_public_key_secret_arn
       },
-      {
-        name      = "KYC_BUCKET"
-        valueFrom = var.kyc_bucket_name
-      }
     ]
 
     environment = [
@@ -251,6 +246,10 @@ resource "aws_ecs_task_definition" "kyc_api" {
       {
         name  = "PORT"
         value = tostring(var.kyc_api_port)
+      },
+      {
+        name  = "KYC_BUCKET"
+        value = var.kyc_bucket_name
       }
     ]
 
@@ -261,6 +260,10 @@ resource "aws_ecs_task_definition" "kyc_api" {
       capabilities = {
         drop = ["ALL"]
       }
+      tmpfs = [{
+        containerPath = "/tmp"
+        size          = 64
+      }]
     }
 
     logConfiguration = {
@@ -316,7 +319,6 @@ resource "aws_ecs_service" "payments_api" {
     type = "ECS"
   }
 
-  # Ignore task definition changes from outside Terraform
   lifecycle {
     ignore_changes = [task_definition]
   }
