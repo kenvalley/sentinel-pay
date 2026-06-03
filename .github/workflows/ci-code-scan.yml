@@ -1,0 +1,241 @@
+# ci-code-scan.yml
+# Reusable workflow — Code & Dependency Security Scanning
+# Called by ci-pr-gate.yml on every PR.
+#
+# Scanners: Gitleaks, Bandit, Semgrep, Trivy (SCA)
+# Severity threshold: CRITICAL and HIGH findings block the PR.
+
+name: CI — Code & Dependency Scan
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  code-scan:
+    name: Code & Dependency Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Gitleaks — secret scanning ────────────────────────────────────────
+      - name: Install Gitleaks
+        run: |
+          wget -qO /tmp/gitleaks.tar.gz \
+            https://github.com/zricethezav/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Gitleaks — scan repository for secrets
+        run: |
+          gitleaks detect \
+            --config .gitleaks.toml \
+            --source . \
+            --redact \
+            --exit-code 1 \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --gitleaks-ignore-path .gitleaksignore \
+            --no-git || {
+            echo "GATE FAILED: Gitleaks found secrets in the repository."
+            cat gitleaks-report.json
+            exit 1
+          }
+          echo "GATE PASSED: No secrets detected."
+
+      # ── Bandit — Python security patterns ────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: pip install bandit[toml]==1.7.8
+
+      - name: Bandit — scan payments-api
+        run: |
+          bandit -r services/payments-api/app \
+            --configfile .bandit \
+            --severity-level high \
+            --confidence-level medium \
+            --format json \
+            --output bandit-payments.json || true
+
+      - name: Bandit — scan kyc-api
+        run: |
+          bandit -r services/kyc-api/app \
+            --configfile .bandit \
+            --severity-level high \
+            --confidence-level medium \
+            --format json \
+            --output bandit-kyc.json || true
+
+      - name: Bandit — evaluate results
+        run: |
+          python3 << 'EOF'
+          import json, sys, os
+
+          total_high = 0
+          total_critical = 0
+
+          for fname in ["bandit-payments.json", "bandit-kyc.json"]:
+              if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+                  print(f"{fname}: no findings or file empty")
+                  continue
+              try:
+                  data = json.load(open(fname))
+                  results = data.get("results", [])
+                  for r in results:
+                      sev = r.get("issue_severity", "").upper()
+                      if sev == "HIGH":
+                          total_high += 1
+                          print(f"[HIGH] {r['test_id']}: {r['issue_text']} at {r['filename']}:{r['line_number']}")
+                      elif sev == "CRITICAL":
+                          total_critical += 1
+                          print(f"[CRITICAL] {r['test_id']}: {r['issue_text']} at {r['filename']}:{r['line_number']}")
+              except (json.JSONDecodeError, FileNotFoundError) as e:
+                  print(f"{fname}: could not parse ({e})")
+
+          print(f"\nBandit summary: {total_critical} critical, {total_high} high")
+
+          if total_critical > 0 or total_high > 0:
+              print("GATE FAILED: Bandit found HIGH or CRITICAL findings.")
+              sys.exit(1)
+
+          print("GATE PASSED: No HIGH or CRITICAL findings.")
+          EOF
+
+      # ── Semgrep — logic-level scanning + custom regression rules ─────────
+      - name: Install Semgrep
+        run: pip install semgrep==1.75.0
+
+      - name: Semgrep — standard Python rules
+        run: |
+          semgrep scan \
+            --config p/python \
+            --config p/flask \
+            --config p/jwt \
+            --severity ERROR \
+            --json \
+            --output semgrep-standard.json \
+            services/ || true
+
+      - name: Semgrep — custom regression rules
+        run: |
+          semgrep scan \
+            --config .github/semgrep/regression-rules.yml \
+            --severity ERROR \
+            --json \
+            --output semgrep-regression.json \
+            services/ || true
+
+      - name: Semgrep — evaluate results
+        run: |
+          python3 << 'EOF'
+          import json, sys, os
+
+          total = 0
+
+          for fname in ["semgrep-standard.json", "semgrep-regression.json"]:
+              if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+                  print(f"{fname}: no findings or file empty")
+                  continue
+              try:
+                  data = json.load(open(fname))
+                  results = data.get("results", [])
+                  for r in results:
+                      total += 1
+                      print(f"[FAIL] {r['check_id']}: {r['extra']['message']} at {r['path']}:{r['start']['line']}")
+              except (json.JSONDecodeError, FileNotFoundError) as e:
+                  print(f"{fname}: could not parse ({e})")
+
+          print(f"\nSemgrep summary: {total} ERROR-level findings")
+
+          if total > 0:
+              print("GATE FAILED: Semgrep found ERROR-level findings.")
+              sys.exit(1)
+
+          print("GATE PASSED: No ERROR-level findings.")
+          EOF
+
+      # ── Trivy SCA — dependency CVE scanning ──────────────────────────────
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -qq && sudo apt-get install -y trivy
+
+      - name: Trivy — scan payments-api dependencies
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity CRITICAL \
+            --exit-code 0 \
+            --format json \
+            --output trivy-payments.json \
+            services/payments-api/requirements.txt
+          
+          CRITICAL=$(python3 -c "
+          import json
+          data = json.load(open('trivy-payments.json'))
+          count = sum(len([v for v in r.get('Vulnerabilities', []) if v.get('Severity') == 'CRITICAL']) for r in data.get('Results', []))
+          print(count)
+          ")
+          echo "payments-api CRITICAL CVEs: $CRITICAL"
+          if [ "$CRITICAL" -gt "0" ]; then
+            echo "TRIVY_FAILED=true" >> $GITHUB_ENV
+          fi
+
+      - name: Trivy — scan kyc-api dependencies
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity CRITICAL \
+            --exit-code 0 \
+            --format json \
+            --output trivy-kyc.json \
+            services/kyc-api/requirements.txt
+          
+          CRITICAL=$(python3 -c "
+          import json
+          data = json.load(open('trivy-kyc.json'))
+          count = sum(len([v for v in r.get('Vulnerabilities', []) if v.get('Severity') == 'CRITICAL']) for r in data.get('Results', []))
+          print(count)
+          ")
+          echo "kyc-api CRITICAL CVEs: $CRITICAL"
+          if [ "$CRITICAL" -gt "0" ]; then
+            echo "TRIVY_FAILED=true" >> $GITHUB_ENV
+          fi
+
+      - name: Trivy — evaluate results
+        run: |
+          if [ "$TRIVY_FAILED" = "true" ]; then
+            echo "GATE FAILED: Trivy found CRITICAL CVEs in dependencies."
+            exit 1
+          fi
+          echo "GATE PASSED: No CRITICAL CVEs found."
+
+      # ── Upload scan artefacts ─────────────────────────────────────────────
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-scan-results-${{ github.run_id }}
+          path: |
+            gitleaks-report.json
+            bandit-payments.json
+            bandit-kyc.json
+            semgrep-standard.json
+            semgrep-regression.json
+            trivy-payments.json
+            trivy-kyc.json
+          retention-days: 30

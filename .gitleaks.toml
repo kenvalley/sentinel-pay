@@ -1,0 +1,18 @@
+# .gitleaks.toml
+# Gitleaks configuration for SentinelPay
+# Excludes files that contain known example/fake credentials.
+
+[extend]
+useDefault = true
+
+[[rules.allowlists]]
+paths = [
+  '''.gitleaksignore''',
+  '''.env.example''',
+]
+
+[allowlist]
+paths = [
+  '''.gitleaksignore''',
+  '''.env.example''',
+]

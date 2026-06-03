@@ -1,0 +1,135 @@
+# cd-deploy.yml
+# Deploys both services to ECS Fargate via OIDC — no long-lived AWS keys.
+# Closes V-PIP-03: replaces hardcoded AWS keys in legacy_deploy.sh
+#
+# Triggers:
+#   - Push to main (after PR merge)
+#   - Manual dispatch with optional image tag override
+
+name: CD — Deploy to ECS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - ".github/workflows/cd-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (default: git SHA)"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  PAYMENTS_API_ECR_REPO: ${{ vars.PAYMENTS_API_ECR_REPO }}
+  KYC_API_ECR_REPO: ${{ vars.KYC_API_ECR_REPO }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  PAYMENTS_API_SERVICE: ${{ vars.PAYMENTS_API_SERVICE }}
+  KYC_API_SERVICE: ${{ vars.KYC_API_SERVICE }}
+
+
+jobs:
+  deploy:
+    name: Build, Push & Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # OIDC — no long-lived keys, closes V-PIP-03
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Deploy-${{ github.run_id }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.sha }}"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Image tag: ${TAG}"
+
+      # Build and push payments-api
+      - name: Build payments-api image
+        run: |
+          docker build \
+            --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:${{ steps.tag.outputs.tag }} \
+            --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:latest \
+            ./services/payments-api
+
+      - name: Push payments-api image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:${{ steps.tag.outputs.tag }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:latest
+
+      # Build and push kyc-api
+      - name: Build kyc-api image
+        run: |
+          docker build \
+            --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:${{ steps.tag.outputs.tag }} \
+            --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:latest \
+            ./services/kyc-api
+
+      - name: Push kyc-api image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:${{ steps.tag.outputs.tag }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:latest
+
+      # Deploy payments-api to ECS
+      - name: Deploy payments-api to ECS
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.PAYMENTS_API_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      # Deploy kyc-api to ECS
+      - name: Deploy kyc-api to ECS
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.KYC_API_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      # Wait for stability
+      - name: Wait for payments-api deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.PAYMENTS_API_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for kyc-api deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.KYC_API_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Image Tag | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| payments-api | ${{ steps.tag.outputs.tag }} | ✅ Stable |" >> $GITHUB_STEP_SUMMARY
+          echo "| kyc-api | ${{ steps.tag.outputs.tag }} | ✅ Stable |" >> $GITHUB_STEP_SUMMARY

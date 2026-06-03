@@ -5,6 +5,8 @@ from flask import Blueprint, request, jsonify
 
 from app.db import get_connection
 from app.auth import require_auth
+from app.audit import emit
+
 
 wallets_bp = Blueprint("wallets", __name__)
 
@@ -37,9 +39,25 @@ def credit_wallet(account_id):
             "VALUES (%s, %s, %s, 'credit', %s, 'completed')",
             (account_id, reference, amount, description)
         )
+
+
+        # conn.commit()
+        # return jsonify({"reference": reference, "new_balance": str(new_balance)})
+
+        # FIXED
         conn.commit()
+        emit(
+            event_type="wallet.debit",
+            outcome="success",
+            account_id=account_id,
+            amount=str(amount),
+            reference=reference,
+            new_balance=str(new_balance),
+        )
 
         return jsonify({"reference": reference, "new_balance": str(new_balance)})
+    
+
     finally:
         cur.close()
         conn.close()
@@ -68,24 +86,79 @@ def debit_wallet(account_id):
     if amount <= 0:
         return jsonify({"error": "amount must be positive"}), 400
 
+    # conn = get_connection()
+    # cur = conn.cursor()
+    # try:
+    #     # Read balance (no lock)
+    #     cur.execute("SELECT balance FROM accounts WHERE id = %s", (account_id,))
+    #     row = cur.fetchone()
+    #     if not row:
+    #         return jsonify({"error": "account not found"}), 404
+
+    #     current_balance = Decimal(str(row["balance"]))
+    #     if current_balance < amount:
+    #         return jsonify({"error": "insufficient funds"}), 400
+
+    #     # Compute new balance in application memory
+    #     new_balance = current_balance - amount
+
+    #     # Write back — two concurrent debits race here.
+    #     cur.execute("UPDATE accounts SET balance = %s WHERE id = %s", (new_balance, account_id))
+
+    #     reference = f"TXN-{uuid.uuid4().hex[:12].upper()}"
+    #     cur.execute(
+    #         "INSERT INTO transactions (account_id, reference, amount, direction, counterparty, description, status) "
+    #         "VALUES (%s, %s, %s, 'debit', %s, %s, 'completed')",
+    #         (account_id, reference, amount, counterparty, description)
+    #     )
+    #     conn.commit()
+
+    #     return jsonify({"reference": reference, "new_balance": str(new_balance)})
+    # finally:
+    #     cur.close()
+    #     conn.close()
+
+
+# FIXED! 
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Read balance (no lock)
-        cur.execute("SELECT balance FROM accounts WHERE id = %s", (account_id,))
+        conn.autocommit = False  # explicit transaction boundary
+
+        # Row lock — concurrent debits queue here instead of racing
+        cur.execute(
+            "SELECT balance FROM accounts WHERE id = %s FOR UPDATE",
+            (account_id,)
+        )
         row = cur.fetchone()
         if not row:
+            conn.rollback()
             return jsonify({"error": "account not found"}), 404
 
         current_balance = Decimal(str(row["balance"]))
+
+        # if current_balance < amount:
+        #     conn.rollback()
+        #     return jsonify({"error": "insufficient funds"}), 400
+
+        # FIXED: Emit failure event for insufficient funds, and include reason in response.
         if current_balance < amount:
+            conn.rollback()
+            emit(
+                event_type="wallet.debit",
+                outcome="failure",
+                reason="insufficient_funds",
+                account_id=account_id,
+                amount=str(amount),
+            )
             return jsonify({"error": "insufficient funds"}), 400
 
-        # Compute new balance in application memory
         new_balance = current_balance - amount
 
-        # Write back — two concurrent debits race here.
-        cur.execute("UPDATE accounts SET balance = %s WHERE id = %s", (new_balance, account_id))
+        cur.execute(
+            "UPDATE accounts SET balance = %s WHERE id = %s",
+            (new_balance, account_id)
+        )
 
         reference = f"TXN-{uuid.uuid4().hex[:12].upper()}"
         cur.execute(
@@ -93,9 +166,26 @@ def debit_wallet(account_id):
             "VALUES (%s, %s, %s, 'debit', %s, %s, 'completed')",
             (account_id, reference, amount, counterparty, description)
         )
+        # conn.commit()  # atomic — both rows commit together
+        # return jsonify({"reference": reference, "new_balance": str(new_balance)})
+    
+        # FIXED
         conn.commit()
+        emit(
+            event_type="wallet.credit",
+            outcome="success",
+            account_id=account_id,
+            amount=str(amount),
+            reference=reference,
+            new_balance=str(new_balance),
+        )
 
         return jsonify({"reference": reference, "new_balance": str(new_balance)})
+
+
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         cur.close()
         conn.close()

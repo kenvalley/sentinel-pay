@@ -1,0 +1,51 @@
+# ── terraform.tfvars.example ──────────────────────────────────────────────────
+#
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is in .gitignore — NEVER commit it.
+#
+# cp terraform.tfvars.example terraform.tfvars
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Project
+aws_region   = "eu-west-2"
+project_name = "sentinelpay"
+environment  = "production"
+owner        = "platform"
+
+# Identity — GitHub OIDC trust
+github_org  = "YOUR_GITHUB_USERNAME"   # e.g. "kenvalley"
+github_repo = "YOUR_REPO_NAME"         # e.g. "sentinel-pay"
+
+# Notifications
+alarm_email = "YOUR_EMAIL@example.com"
+
+# ── Values below can stay as defaults unless you need to change them ──────────
+
+# Network
+vpc_cidr                  = "10.0.0.0/16"
+availability_zones        = ["eu-west-2a", "eu-west-2b"]
+public_subnet_cidrs       = ["10.0.1.0/24", "10.0.2.0/24"]
+private_app_subnet_cidrs  = ["10.0.10.0/24", "10.0.11.0/24"]
+private_data_subnet_cidrs = ["10.0.20.0/24", "10.0.21.0/24"]
+
+# Database
+db_name           = "sentinelpay"
+db_username       = "sentinel"
+db_instance_class = "db.t3.micro"
+
+# Cache
+redis_node_type = "cache.t3.micro"
+
+# Compute
+ecs_task_cpu      = 256
+ecs_task_memory   = 512
+ecs_desired_count = 2
+payments_api_port = 8001
+kyc_api_port      = 8002
+
+# Edge
+waf_rate_limit = 100
+
+# Observability
+cloudtrail_retention_days = 90
+flow_log_retention_days   = 30
