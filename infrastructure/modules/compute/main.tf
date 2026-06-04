@@ -148,8 +148,14 @@ resource "aws_ecs_task_definition" "payments_api" {
 
     portMappings = [{
       containerPort = var.payments_api_port
+      hostPort      = var.payments_api_port
       protocol      = "tcp"
     }]
+
+    essential    = true
+    mountPoints  = []
+    volumesFrom  = []
+    systemControls = []
 
     # Secrets injected by the ECS agent using the execution role
     secrets = [
@@ -194,6 +200,7 @@ resource "aws_ecs_task_definition" "payments_api" {
 
     linuxParameters = {
       capabilities = {
+        add  = []
         drop = ["ALL"]
       }
     }
@@ -219,6 +226,13 @@ resource "aws_ecs_task_definition" "payments_api" {
   tags = merge(var.common_tags, {
     Name = "${var.name_prefix}-payments-api-task"
   })
+
+  lifecycle {
+    ignore_changes = [
+      # AWS injects these fields automatically — ignore to prevent perpetual drift
+      container_definitions
+    ]
+  }
 }
 
 # ── kyc-api Task Definition ───────────────────────────────────────────────────
@@ -242,8 +256,14 @@ resource "aws_ecs_task_definition" "kyc_api" {
 
     portMappings = [{
       containerPort = var.kyc_api_port
+      hostPort      = var.kyc_api_port
       protocol      = "tcp"
     }]
+
+    essential    = true
+    mountPoints  = []
+    volumesFrom  = []
+    systemControls = []
 
     # Secrets injected by the ECS agent using the execution role
     # kyc-api reads shared payments-api/* secrets (DB, Redis, JWT)
@@ -288,6 +308,7 @@ resource "aws_ecs_task_definition" "kyc_api" {
 
     linuxParameters = {
       capabilities = {
+        add  = []
         drop = ["ALL"]
       }
     }
@@ -313,6 +334,13 @@ resource "aws_ecs_task_definition" "kyc_api" {
   tags = merge(var.common_tags, {
     Name = "${var.name_prefix}-kyc-api-task"
   })
+
+  lifecycle {
+    ignore_changes = [
+      # AWS injects these fields automatically — ignore to prevent perpetual drift
+      container_definitions
+    ]
+  }
 }
 
 # ── ECS Services ──────────────────────────────────────────────────────────────
