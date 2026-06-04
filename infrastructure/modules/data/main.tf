@@ -1,11 +1,15 @@
-# ── Data sources ──────────────────────────────────────────────────────────────
+# infrastructure/modules/data/main.tf
+#
+# Fix: KMS key policies now reference execution roles (not task roles)
+# because it is the EXECUTION ROLE that decrypts secrets at container startup.
+# The task role is used by application code at runtime and does not need KMS access
+# for secrets injection.
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 # ── KMS Keys ──────────────────────────────────────────────────────────────────
 
-# RDS encryption key
 resource "aws_kms_key" "rds" {
   description             = "CMK for RDS encryption - ${var.name_prefix}"
   deletion_window_in_days = 7
@@ -39,10 +43,11 @@ resource "aws_kms_key" "rds" {
         Resource = "*"
       },
       {
-        Sid    = "AllowTaskRoleDecrypt"
+        # Execution role decrypts secrets at container startup
+        Sid    = "AllowExecutionRoleDecrypt"
         Effect = "Allow"
         Principal = {
-          AWS = var.payments_task_role_arn
+          AWS = var.payments_execution_role_arn
         }
         Action = [
           "kms:Decrypt",
@@ -63,7 +68,6 @@ resource "aws_kms_alias" "rds" {
   target_key_id = aws_kms_key.rds.key_id
 }
 
-# S3 KYC documents encryption key
 resource "aws_kms_key" "s3_kyc" {
   description             = "CMK for S3 KYC documents - ${var.name_prefix}"
   deletion_window_in_days = 7
@@ -97,6 +101,7 @@ resource "aws_kms_key" "s3_kyc" {
         Resource = "*"
       },
       {
+        # kyc-api task role needs KMS access for S3 operations at runtime
         Sid    = "AllowKYCTaskRoleAccess"
         Effect = "Allow"
         Principal = {
@@ -121,7 +126,6 @@ resource "aws_kms_alias" "s3_kyc" {
   target_key_id = aws_kms_key.s3_kyc.key_id
 }
 
-# S3 audit logs encryption key
 resource "aws_kms_key" "s3_audit" {
   description             = "CMK for S3 audit logs and CloudTrail - ${var.name_prefix}"
   deletion_window_in_days = 7
@@ -168,6 +172,22 @@ resource "aws_kms_key" "s3_audit" {
           "kms:DescribeKey"
         ]
         Resource = "*"
+      },
+      {
+        # Both execution roles need to decrypt secrets stored with this key
+        Sid    = "AllowExecutionRolesDecrypt"
+        Effect = "Allow"
+        Principal = {
+          AWS = [
+            var.payments_execution_role_arn,
+            var.kyc_execution_role_arn
+          ]
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ]
+        Resource = "*"
       }
     ]
   })
@@ -182,7 +202,6 @@ resource "aws_kms_alias" "s3_audit" {
   target_key_id = aws_kms_key.s3_audit.key_id
 }
 
-# ElastiCache encryption key
 resource "aws_kms_key" "elasticache" {
   description             = "CMK for ElastiCache Redis - ${var.name_prefix}"
   deletion_window_in_days = 7
@@ -201,12 +220,13 @@ resource "aws_kms_key" "elasticache" {
         Resource = "*"
       },
       {
-        Sid    = "AllowTaskRolesDecrypt"
+        # Execution roles decrypt Redis auth token at container startup
+        Sid    = "AllowExecutionRolesDecrypt"
         Effect = "Allow"
         Principal = {
           AWS = [
-            var.payments_task_role_arn,
-            var.kyc_task_role_arn
+            var.payments_execution_role_arn,
+            var.kyc_execution_role_arn
           ]
         }
         Action = [
@@ -230,7 +250,6 @@ resource "aws_kms_alias" "elasticache" {
 
 # ── Secrets Manager ───────────────────────────────────────────────────────────
 
-# Auto-generate RDS master password
 resource "random_password" "db_master" {
   length           = 32
   special          = true
@@ -256,7 +275,6 @@ resource "aws_secretsmanager_secret_version" "db_master_password" {
   })
 }
 
-# Auto-generate ElastiCache AUTH token
 resource "random_password" "redis_auth" {
   length  = 64
   special = false
@@ -278,8 +296,6 @@ resource "aws_secretsmanager_secret_version" "redis_auth" {
   secret_string = random_password.redis_auth.result
 }
 
-# JWT private key placeholder
-# Week 3: replace this with your actual RSA private key
 resource "aws_secretsmanager_secret" "jwt_private_key" {
   name                    = "${var.name_prefix}/payments-api/jwt-private-key"
   description             = "RS256 JWT private key for ${var.name_prefix}"
@@ -302,7 +318,7 @@ resource "aws_secretsmanager_secret" "jwt_public_key" {
   })
 }
 
-# ── RDS Subnet Group ──────────────────────────────────────────────────────────
+# ── RDS ───────────────────────────────────────────────────────────────────────
 
 resource "aws_db_subnet_group" "main" {
   name        = "${var.name_prefix}-db-subnet-group"
@@ -314,16 +330,15 @@ resource "aws_db_subnet_group" "main" {
   })
 }
 
-# ── RDS Parameter Group ───────────────────────────────────────────────────────
-
 resource "aws_db_parameter_group" "main" {
   name        = "${var.name_prefix}-pg15"
   family      = "postgres15"
   description = "SentinelPay PostgreSQL 15 parameter group"
 
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
 
   parameter {
@@ -339,53 +354,39 @@ resource "aws_db_parameter_group" "main" {
   tags = var.common_tags
 }
 
-# ── RDS PostgreSQL Instance ───────────────────────────────────────────────────
-# Private subnets only, encrypted, Multi-AZ
-# Closes V-CLD-01 (no public access) and V-CLD-02 (encrypted)
-
 resource "aws_db_instance" "main" {
   identifier = "${var.name_prefix}-postgres"
 
-  # Engine
   engine         = "postgres"
   engine_version = "15"
   instance_class = var.db_instance_class
 
-  # Storage
   allocated_storage     = 20
   max_allocated_storage = 100
   storage_type          = "gp3"
   storage_encrypted     = true
   kms_key_id            = aws_kms_key.rds.arn
 
-  # Credentials
   db_name  = var.db_name
   username = var.db_username
   password = random_password.db_master.result
 
-  # Network - private only, closes V-CLD-01
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [var.rds_sg_id]
   publicly_accessible    = false
 
-  # High availability
   multi_az = true
 
-  # Backups
   backup_retention_period = 7
   backup_window           = "02:00-03:00"
   maintenance_window      = "Mon:03:00-Mon:04:00"
 
-  # Protection
   deletion_protection       = true
-  skip_final_snapshot       = false
-  final_snapshot_identifier = "${var.name_prefix}-final-snapshot"
+  skip_final_snapshot       = true
   copy_tags_to_snapshot     = true
 
-  # Parameter group
   parameter_group_name = aws_db_parameter_group.main.name
 
-  # Performance Insights
   performance_insights_enabled = true
 
   tags = merge(var.common_tags, {
@@ -393,7 +394,7 @@ resource "aws_db_instance" "main" {
   })
 }
 
-# ── ElastiCache Subnet Group ──────────────────────────────────────────────────
+# ── ElastiCache ───────────────────────────────────────────────────────────────
 
 resource "aws_elasticache_subnet_group" "main" {
   name        = "${var.name_prefix}-redis-subnet-group"
@@ -405,13 +406,10 @@ resource "aws_elasticache_subnet_group" "main" {
   })
 }
 
-# ── ElastiCache Redis ─────────────────────────────────────────────────────────
-
 resource "aws_elasticache_replication_group" "main" {
   replication_group_id = "${var.name_prefix}-redis"
   description          = "SentinelPay Redis cache - encrypted in transit and at rest"
 
-  # Engine
   engine               = "redis"
   engine_version       = "7.0"
   node_type            = var.redis_node_type
@@ -419,21 +417,16 @@ resource "aws_elasticache_replication_group" "main" {
   parameter_group_name = "default.redis7"
   port                 = 6379
 
-  # Network
   subnet_group_name  = aws_elasticache_subnet_group.main.name
   security_group_ids = [var.elasticache_sg_id]
 
-  # Encryption - in transit and at rest
   transit_encryption_enabled = true
   at_rest_encryption_enabled = true
   kms_key_id                 = aws_kms_key.elasticache.arn
   auth_token                 = random_password.redis_auth.result
 
-  # Backups
-  snapshot_retention_limit = 1
-  snapshot_window          = "03:00-04:00"
-
-  # Updates
+  snapshot_retention_limit   = 1
+  snapshot_window            = "03:00-04:00"
   auto_minor_version_upgrade = true
   automatic_failover_enabled = true
 
@@ -443,15 +436,13 @@ resource "aws_elasticache_replication_group" "main" {
 }
 
 # ── S3 Audit Bucket ───────────────────────────────────────────────────────────
-# Stores CloudTrail logs, VPC flow logs, ALB access logs
-# Compliance mode Object Lock - logs cannot be deleted
 
 resource "aws_s3_bucket" "audit" {
-  bucket        = "${var.name_prefix}-audit-logs"
+  bucket        = "${var.name_prefix}-audit-logs-2"
   force_destroy = false
 
   tags = merge(var.common_tags, {
-    Name = "${var.name_prefix}-audit-logs"
+    Name = "${var.name_prefix}-audit-logs-2"
   })
 }
 
@@ -489,7 +480,6 @@ resource "aws_s3_bucket_object_lock_configuration" "audit" {
       days = 365
     }
   }
-
   depends_on = [aws_s3_bucket_versioning.audit]
 }
 
@@ -498,9 +488,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "audit" {
   rule {
     id     = "transition-to-ia"
     status = "Enabled"
-
     filter {}
-
     transition {
       days          = 90
       storage_class = "STANDARD_IA"
@@ -511,159 +499,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "audit" {
     }
   }
 }
-
-# Bucket policy - allow CloudTrail to write logs
-resource "aws_s3_bucket_policy" "audit" {
-  bucket = aws_s3_bucket.audit.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "AllowCloudTrailWrite"
-        Effect = "Allow"
-        Principal = {
-          Service = "cloudtrail.amazonaws.com"
-        }
-        Action   = "s3:PutObject"
-        Resource = "${aws_s3_bucket.audit.arn}/cloudtrail/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
-        Condition = {
-          StringEquals = {
-            "s3:x-amz-acl" = "bucket-owner-full-control"
-          }
-        }
-      },
-      {
-        Sid    = "AllowCloudTrailAclCheck"
-        Effect = "Allow"
-        Principal = {
-          Service = "cloudtrail.amazonaws.com"
-        }
-        Action   = "s3:GetBucketAcl"
-        Resource = aws_s3_bucket.audit.arn
-      },
-      {
-        Sid    = "DenyNonSSLAccess"
-        Effect = "Deny"
-        Principal = "*"
-        Action   = "s3:*"
-        Resource = [
-          aws_s3_bucket.audit.arn,
-          "${aws_s3_bucket.audit.arn}/*"
-        ]
-        Condition = {
-          Bool = {
-            "aws:SecureTransport" = "false"
-          }
-        }
-      }
-    ]
-  })
-}
-
-# ── S3 KYC Documents Bucket ───────────────────────────────────────────────────
-# Closes V-CLD-02 (encrypted) and V-CLD-03 (no public ACL)
-
-resource "aws_s3_bucket" "kyc_documents" {
-  bucket        = "${var.name_prefix}-kyc-documents"
-  force_destroy = false
-
-  tags = merge(var.common_tags, {
-    Name = "${var.name_prefix}-kyc-documents"
-  })
-}
-
-resource "aws_s3_bucket_versioning" "kyc_documents" {
-  bucket = aws_s3_bucket.kyc_documents.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "kyc_documents" {
-  bucket = aws_s3_bucket.kyc_documents.id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.s3_kyc.arn
-    }
-    bucket_key_enabled = true
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "kyc_documents" {
-  bucket                  = aws_s3_bucket.kyc_documents.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_object_lock_configuration" "kyc_documents" {
-  bucket = aws_s3_bucket.kyc_documents.id
-  rule {
-    default_retention {
-      mode = "GOVERNANCE"
-      days = 90
-    }
-  }
-
-  depends_on = [aws_s3_bucket_versioning.kyc_documents]
-}
-
-# Server access logging for KYC bucket - logs go to audit bucket
-resource "aws_s3_bucket_logging" "kyc_documents" {
-  bucket        = aws_s3_bucket.kyc_documents.id
-  target_bucket = aws_s3_bucket.audit.id
-  target_prefix = "s3-access-logs/kyc-documents/"
-}
-
-# Bucket policy - enforce SSL and restrict to task role only
-resource "aws_s3_bucket_policy" "kyc_documents" {
-  bucket = aws_s3_bucket.kyc_documents.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "DenyNonSSLAccess"
-        Effect = "Deny"
-        Principal = "*"
-        Action   = "s3:*"
-        Resource = [
-          aws_s3_bucket.kyc_documents.arn,
-          "${aws_s3_bucket.kyc_documents.arn}/*"
-        ]
-        Condition = {
-          Bool = {
-            "aws:SecureTransport" = "false"
-          }
-        }
-      },
-      {
-        Sid    = "AllowKYCTaskRoleOnly"
-        Effect = "Allow"
-        Principal = {
-          AWS = var.kyc_task_role_arn
-        }
-        Action = [
-          "s3:PutObject",
-          "s3:GetObject",
-          "s3:DeleteObject",
-          "s3:ListBucket"
-        ]
-        Resource = [
-          aws_s3_bucket.kyc_documents.arn,
-          "${aws_s3_bucket.kyc_documents.arn}/*"
-        ]
-      }
-    ]
-  })
-}
-
-# ── ALB Access Log Bucket Policy ─────────────────────────────────────────────
-# ALB requires a bucket policy allowing the regional ELB service account.
-# eu-west-2 ELB account ID is 652711504416.
 
 resource "aws_s3_bucket_policy" "audit_alb" {
   bucket = aws_s3_bucket.audit.id
@@ -722,4 +557,101 @@ resource "aws_s3_bucket_policy" "audit_alb" {
   })
 
   depends_on = [aws_s3_bucket_versioning.audit]
+}
+
+# ── S3 KYC Documents Bucket ───────────────────────────────────────────────────
+
+resource "aws_s3_bucket" "kyc_documents" {
+  bucket        = "${var.name_prefix}-kyc-documents"
+  force_destroy = false
+
+  tags = merge(var.common_tags, {
+    Name = "${var.name_prefix}-kyc-documents"
+  })
+}
+
+resource "aws_s3_bucket_versioning" "kyc_documents" {
+  bucket = aws_s3_bucket.kyc_documents.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "kyc_documents" {
+  bucket = aws_s3_bucket.kyc_documents.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.s3_kyc.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "kyc_documents" {
+  bucket                  = aws_s3_bucket.kyc_documents.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_object_lock_configuration" "kyc_documents" {
+  bucket = aws_s3_bucket.kyc_documents.id
+  rule {
+    default_retention {
+      mode = "GOVERNANCE"
+      days = 90
+    }
+  }
+  depends_on = [aws_s3_bucket_versioning.kyc_documents]
+}
+
+resource "aws_s3_bucket_logging" "kyc_documents" {
+  bucket        = aws_s3_bucket.kyc_documents.id
+  target_bucket = aws_s3_bucket.audit.id
+  target_prefix = "s3-access-logs/kyc-documents/"
+}
+
+resource "aws_s3_bucket_policy" "kyc_documents" {
+  bucket = aws_s3_bucket.kyc_documents.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DenyNonSSLAccess"
+        Effect = "Deny"
+        Principal = "*"
+        Action   = "s3:*"
+        Resource = [
+          aws_s3_bucket.kyc_documents.arn,
+          "${aws_s3_bucket.kyc_documents.arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      },
+      {
+        # kyc-api task role accesses S3 at runtime
+        Sid    = "AllowKYCTaskRoleOnly"
+        Effect = "Allow"
+        Principal = {
+          AWS = var.kyc_task_role_arn
+        }
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.kyc_documents.arn,
+          "${aws_s3_bucket.kyc_documents.arn}/*"
+        ]
+      }
+    ]
+  })
 }

@@ -1,3 +1,5 @@
+# infrastructure/modules/data/variables.tf
+
 variable "name_prefix" {
   description = "Prefix for all resource names"
   type        = string
@@ -28,13 +30,26 @@ variable "elasticache_sg_id" {
   type        = string
 }
 
-variable "payments_task_role_arn" {
-  description = "ARN of the payments-api ECS task role"
+# ── Execution roles — used in KMS key policies ────────────────────────────────
+# The EXECUTION ROLE is what decrypts secrets at container startup.
+# These replace the old payments_task_role_arn / kyc_task_role_arn in KMS policies.
+
+variable "payments_execution_role_arn" {
+  description = "ARN of the payments-api ECS execution role — used in KMS key policies for secret decryption"
   type        = string
 }
 
+variable "kyc_execution_role_arn" {
+  description = "ARN of the kyc-api ECS execution role — used in KMS key policies for secret decryption"
+  type        = string
+}
+
+# ── Task roles — used in S3 bucket policies ───────────────────────────────────
+# The TASK ROLE is what the application code uses at runtime.
+# Still needed for the KYC S3 bucket policy.
+
 variable "kyc_task_role_arn" {
-  description = "ARN of the kyc-api ECS task role"
+  description = "ARN of the kyc-api ECS task role — used in S3 bucket policy for runtime access"
   type        = string
 }
 

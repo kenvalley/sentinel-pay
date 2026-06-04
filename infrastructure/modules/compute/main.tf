@@ -1,3 +1,14 @@
+# modules/compute/main.tf
+#
+# Key fixes:
+# 1. execution_role_arn and task_role_arn are now SEPARATE roles
+#    - execution_role = ECS agent uses this to pull secrets/images before container starts
+#    - task_role      = application code uses this at runtime
+# 2. /tmp fix: TMPDIR is set as an environment variable pointing to /app/tmp
+#    which is created in the Dockerfile with correct ownership for appuser (UID 1001)
+#    This avoids the readonlyRootFilesystem + non-root user conflict entirely
+# 3. KYC_BUCKET is an environment variable, not a secret
+
 # ── Data sources ──────────────────────────────────────────────────────────────
 
 data "aws_caller_identity" "current" {}
@@ -39,10 +50,8 @@ resource "aws_ecr_repository" "kyc_api" {
   })
 }
 
-# ECR lifecycle policies - keep last 10 images
 resource "aws_ecr_lifecycle_policy" "payments_api" {
   repository = aws_ecr_repository.payments_api.name
-
   policy = jsonencode({
     rules = [{
       rulePriority = 1
@@ -59,7 +68,6 @@ resource "aws_ecr_lifecycle_policy" "payments_api" {
 
 resource "aws_ecr_lifecycle_policy" "kyc_api" {
   repository = aws_ecr_repository.kyc_api.name
-
   policy = jsonencode({
     rules = [{
       rulePriority = 1
@@ -127,8 +135,12 @@ resource "aws_ecs_task_definition" "payments_api" {
   network_mode             = "awsvpc"
   cpu                      = var.ecs_task_cpu
   memory                   = var.ecs_task_memory
-  task_role_arn            = var.payments_api_task_role_arn
-  execution_role_arn       = var.payments_api_task_role_arn
+
+  # CRITICAL: execution_role pulls secrets/images BEFORE container starts
+  execution_role_arn = var.payments_api_execution_role_arn
+
+  # task_role is used by application code INSIDE the running container
+  task_role_arn = var.payments_api_task_role_arn
 
   container_definitions = jsonencode([{
     name  = "payments-api"
@@ -136,10 +148,16 @@ resource "aws_ecs_task_definition" "payments_api" {
 
     portMappings = [{
       containerPort = var.payments_api_port
+      hostPort      = var.payments_api_port
       protocol      = "tcp"
     }]
 
-    # Secrets from Secrets Manager - never in environment variables
+    essential    = true
+    mountPoints  = []
+    volumesFrom  = []
+    systemControls = []
+
+    # Secrets injected by the ECS agent using the execution role
     secrets = [
       {
         name      = "DATABASE_URL"
@@ -159,7 +177,6 @@ resource "aws_ecs_task_definition" "payments_api" {
       }
     ]
 
-    # Non-sensitive environment variables only
     environment = [
       {
         name  = "ENVIRONMENT"
@@ -168,15 +185,22 @@ resource "aws_ecs_task_definition" "payments_api" {
       {
         name  = "PORT"
         value = tostring(var.payments_api_port)
+      },
+      {
+        # TMPDIR fix: gunicorn writes temp files to /app/tmp which is
+        # created in the Dockerfile with correct ownership for appuser.
+        # This avoids the readonlyRootFilesystem + non-root conflict.
+        name  = "TMPDIR"
+        value = "/app/tmp"
       }
     ]
 
-    # Security hardening
     readonlyRootFilesystem = true
     user                   = "1001:1001"
 
     linuxParameters = {
       capabilities = {
+        add  = []
         drop = ["ALL"]
       }
     }
@@ -191,7 +215,7 @@ resource "aws_ecs_task_definition" "payments_api" {
     }
 
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -f http://localhost:${var.payments_api_port}/health || exit 1"]
+      command     = ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${var.payments_api_port}/health')\" || exit 1"]
       interval    = 30
       timeout     = 5
       retries     = 3
@@ -202,6 +226,13 @@ resource "aws_ecs_task_definition" "payments_api" {
   tags = merge(var.common_tags, {
     Name = "${var.name_prefix}-payments-api-task"
   })
+
+  lifecycle {
+    ignore_changes = [
+      # AWS injects these fields automatically — ignore to prevent perpetual drift
+      container_definitions
+    ]
+  }
 }
 
 # ── kyc-api Task Definition ───────────────────────────────────────────────────
@@ -212,8 +243,12 @@ resource "aws_ecs_task_definition" "kyc_api" {
   network_mode             = "awsvpc"
   cpu                      = var.ecs_task_cpu
   memory                   = var.ecs_task_memory
-  task_role_arn            = var.kyc_api_task_role_arn
-  execution_role_arn       = var.kyc_api_task_role_arn
+
+  # CRITICAL: execution_role pulls secrets/images BEFORE container starts
+  execution_role_arn = var.kyc_api_execution_role_arn
+
+  # task_role is used by application code INSIDE the running container
+  task_role_arn = var.kyc_api_task_role_arn
 
   container_definitions = jsonencode([{
     name  = "kyc-api"
@@ -221,9 +256,17 @@ resource "aws_ecs_task_definition" "kyc_api" {
 
     portMappings = [{
       containerPort = var.kyc_api_port
+      hostPort      = var.kyc_api_port
       protocol      = "tcp"
     }]
 
+    essential    = true
+    mountPoints  = []
+    volumesFrom  = []
+    systemControls = []
+
+    # Secrets injected by the ECS agent using the execution role
+    # kyc-api reads shared payments-api/* secrets (DB, Redis, JWT)
     secrets = [
       {
         name      = "DATABASE_URL"
@@ -236,10 +279,6 @@ resource "aws_ecs_task_definition" "kyc_api" {
       {
         name      = "JWT_PUBLIC_KEY"
         valueFrom = var.jwt_public_key_secret_arn
-      },
-      {
-        name      = "KYC_BUCKET"
-        valueFrom = var.kyc_bucket_name
       }
     ]
 
@@ -251,6 +290,16 @@ resource "aws_ecs_task_definition" "kyc_api" {
       {
         name  = "PORT"
         value = tostring(var.kyc_api_port)
+      },
+      {
+        # KYC_BUCKET is a plain string — not a secret
+        name  = "KYC_BUCKET"
+        value = var.kyc_bucket_name
+      },
+      {
+        # TMPDIR fix: same as payments-api
+        name  = "TMPDIR"
+        value = "/app/tmp"
       }
     ]
 
@@ -259,6 +308,7 @@ resource "aws_ecs_task_definition" "kyc_api" {
 
     linuxParameters = {
       capabilities = {
+        add  = []
         drop = ["ALL"]
       }
     }
@@ -273,7 +323,7 @@ resource "aws_ecs_task_definition" "kyc_api" {
     }
 
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -f http://localhost:${var.kyc_api_port}/health || exit 1"]
+      command     = ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${var.kyc_api_port}/health')\" || exit 1"]
       interval    = 30
       timeout     = 5
       retries     = 3
@@ -284,6 +334,13 @@ resource "aws_ecs_task_definition" "kyc_api" {
   tags = merge(var.common_tags, {
     Name = "${var.name_prefix}-kyc-api-task"
   })
+
+  lifecycle {
+    ignore_changes = [
+      # AWS injects these fields automatically — ignore to prevent perpetual drift
+      container_definitions
+    ]
+  }
 }
 
 # ── ECS Services ──────────────────────────────────────────────────────────────
@@ -316,7 +373,7 @@ resource "aws_ecs_service" "payments_api" {
     type = "ECS"
   }
 
-  # Ignore task definition changes from outside Terraform
+  # Allow CD pipeline to update task definition without Terraform conflicts
   lifecycle {
     ignore_changes = [task_definition]
   }
