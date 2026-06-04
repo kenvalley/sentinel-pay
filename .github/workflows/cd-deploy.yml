@@ -5,6 +5,9 @@
 # Triggers:
 #   - Push to main (after PR merge)
 #   - Manual dispatch with optional image tag override
+#
+# Fix: now registers new task definition revisions with updated image URIs
+# before updating the service — ensures the new image is actually deployed.
 
 name: CD — Deploy to ECS
 
@@ -22,9 +25,8 @@ on:
         default: ""
 
 permissions:
-  id-token: write   # required for OIDC
+  id-token: write
   contents: read
-
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
@@ -33,7 +35,6 @@ env:
   ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
   PAYMENTS_API_SERVICE: ${{ vars.PAYMENTS_API_SERVICE }}
   KYC_API_SERVICE: ${{ vars.KYC_API_SERVICE }}
-
 
 jobs:
   deploy:
@@ -67,51 +68,114 @@ jobs:
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Image tag: ${TAG}"
 
-      # Build and push payments-api
+      # ── Build and push payments-api ───────────────────────────────────────
       - name: Build payments-api image
         run: |
           docker build \
             --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:${{ steps.tag.outputs.tag }} \
-            --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:latest \
             ./services/payments-api
 
       - name: Push payments-api image
         run: |
           docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:${{ steps.tag.outputs.tag }}
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:latest
 
-      # Build and push kyc-api
+      # ── Build and push kyc-api ────────────────────────────────────────────
       - name: Build kyc-api image
         run: |
           docker build \
             --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:${{ steps.tag.outputs.tag }} \
-            --tag ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:latest \
             ./services/kyc-api
 
       - name: Push kyc-api image
         run: |
           docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:${{ steps.tag.outputs.tag }}
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:latest
 
-      # Deploy payments-api to ECS
+      # ── Register new task definitions with updated image URIs ─────────────
+      # This is the critical step — get current task def, swap the image URI,
+      # register a new revision, then update the service to use it.
+
+      - name: Register new payments-api task definition
+        id: payments-taskdef
+        run: |
+          # Get current task definition
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.PAYMENTS_API_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition' \
+            --output json)
+
+          # Update image URI in container definitions
+          NEW_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.PAYMENTS_API_ECR_REPO }}:${{ steps.tag.outputs.tag }}"
+          NEW_TASK_DEF=$(echo $TASK_DEF | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          d['containerDefinitions'][0]['image'] = '$NEW_IMAGE'
+          # Remove fields that cannot be passed to register-task-definition
+          for key in ['taskDefinitionArn','revision','status','requiresAttributes',
+                      'compatibilities','registeredAt','registeredBy','enableFaultInjection']:
+              d.pop(key, None)
+          print(json.dumps(d))
+          ")
+
+          # Register new revision
+          NEW_ARN=$(aws ecs register-task-definition \
+            --region ${{ env.AWS_REGION }} \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "new_arn=${NEW_ARN}" >> $GITHUB_OUTPUT
+          echo "Registered new payments-api task definition: ${NEW_ARN}"
+
+      - name: Register new kyc-api task definition
+        id: kyc-taskdef
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.KYC_API_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition' \
+            --output json)
+
+          NEW_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.KYC_API_ECR_REPO }}:${{ steps.tag.outputs.tag }}"
+          NEW_TASK_DEF=$(echo $TASK_DEF | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          d['containerDefinitions'][0]['image'] = '$NEW_IMAGE'
+          for key in ['taskDefinitionArn','revision','status','requiresAttributes',
+                      'compatibilities','registeredAt','registeredBy','enableFaultInjection']:
+              d.pop(key, None)
+          print(json.dumps(d))
+          ")
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --region ${{ env.AWS_REGION }} \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "new_arn=${NEW_ARN}" >> $GITHUB_OUTPUT
+          echo "Registered new kyc-api task definition: ${NEW_ARN}"
+
+      # ── Update ECS services to use new task definitions ───────────────────
       - name: Deploy payments-api to ECS
         run: |
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.PAYMENTS_API_SERVICE }} \
-            --force-new-deployment \
+            --task-definition ${{ steps.payments-taskdef.outputs.new_arn }} \
             --region ${{ env.AWS_REGION }}
+          echo "payments-api service updated to: ${{ steps.payments-taskdef.outputs.new_arn }}"
 
-      # Deploy kyc-api to ECS
       - name: Deploy kyc-api to ECS
         run: |
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.KYC_API_SERVICE }} \
-            --force-new-deployment \
+            --task-definition ${{ steps.kyc-taskdef.outputs.new_arn }} \
             --region ${{ env.AWS_REGION }}
+          echo "kyc-api service updated to: ${{ steps.kyc-taskdef.outputs.new_arn }}"
 
-      # Wait for stability
+      # ── Wait for stability ────────────────────────────────────────────────
       - name: Wait for payments-api deployment
         run: |
           aws ecs wait services-stable \
@@ -129,7 +193,7 @@ jobs:
       - name: Deployment summary
         run: |
           echo "### Deployment Complete" >> $GITHUB_STEP_SUMMARY
-          echo "| Service | Image Tag | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| payments-api | ${{ steps.tag.outputs.tag }} | ✅ Stable |" >> $GITHUB_STEP_SUMMARY
-          echo "| kyc-api | ${{ steps.tag.outputs.tag }} | ✅ Stable |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Image Tag | Task Definition | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| payments-api | ${{ steps.tag.outputs.tag }} | ${{ steps.payments-taskdef.outputs.new_arn }} | ✅ Stable |" >> $GITHUB_STEP_SUMMARY
+          echo "| kyc-api | ${{ steps.tag.outputs.tag }} | ${{ steps.kyc-taskdef.outputs.new_arn }} | ✅ Stable |" >> $GITHUB_STEP_SUMMARY
