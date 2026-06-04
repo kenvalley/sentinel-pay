@@ -7,10 +7,6 @@ from app.security import validate_callback_url
 from app.db import get_connection
 from app.auth import require_auth
 
-# Add payments-api security module to path for shared SSRF guard
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../../payments-api/app'))
-from security import validate_callback_url
-
 verify_bp = Blueprint("verify", __name__)
 
 BVN_LOOKUP_URL = os.environ.get("BVN_LOOKUP_URL", "https://api.mock-cbn.local/bvn")

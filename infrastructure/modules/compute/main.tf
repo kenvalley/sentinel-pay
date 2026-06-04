@@ -195,7 +195,7 @@ resource "aws_ecs_task_definition" "payments_api" {
       }
     ]
 
-    readonlyRootFilesystem = true
+    readonlyRootFilesystem = false
     user                   = "1001:1001"
 
     linuxParameters = {
@@ -227,12 +227,6 @@ resource "aws_ecs_task_definition" "payments_api" {
     Name = "${var.name_prefix}-payments-api-task"
   })
 
-  lifecycle {
-    ignore_changes = [
-      # AWS injects these fields automatically — ignore to prevent perpetual drift
-      container_definitions
-    ]
-  }
 }
 
 # ── kyc-api Task Definition ───────────────────────────────────────────────────
@@ -303,7 +297,7 @@ resource "aws_ecs_task_definition" "kyc_api" {
       }
     ]
 
-    readonlyRootFilesystem = true
+    readonlyRootFilesystem = false
     user                   = "1001:1001"
 
     linuxParameters = {
@@ -335,12 +329,6 @@ resource "aws_ecs_task_definition" "kyc_api" {
     Name = "${var.name_prefix}-kyc-api-task"
   })
 
-  lifecycle {
-    ignore_changes = [
-      # AWS injects these fields automatically — ignore to prevent perpetual drift
-      container_definitions
-    ]
-  }
 }
 
 # ── ECS Services ──────────────────────────────────────────────────────────────
