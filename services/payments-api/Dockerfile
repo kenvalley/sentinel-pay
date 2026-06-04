@@ -1,41 +1,30 @@
+# services/payments-api/Dockerfile
+#
+# Security fixes applied:
+# - Non-root user (appuser UID 1001)
+# - Slim base image to reduce attack surface
+# - /app/tmp created with correct ownership for gunicorn temp files
+# - TMPDIR set to /app/tmp to avoid readonlyRootFilesystem issues on ECS Fargate
 
-#FIXED - Updated the Dockerfile to use a non-root user for better security. 
-# Also switched to a slim Python image to reduce the attack surface and image size. 
-# Added explicit ownership of files to the non-root user.
 FROM python:3.11-slim
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && useradd -m -u 1001 appuser
+    && useradd -m -u 1001 appuser \
+    && mkdir -p /app/tmp \
+    && chown -R appuser:appuser /app/tmp
 
 COPY --chown=appuser:appuser . .
 
 USER appuser
 
+# Tell gunicorn and Python to use /app/tmp for all temporary files
+# This allows readonlyRootFilesystem=true on ECS Fargate without
+# requiring a volume mount for /tmp
+ENV TMPDIR=/app/tmp
+
 EXPOSE 8001
 
 CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8001", "app.main:create_app()"]
-
-
-
-
-
-# Original Dockerfile (for reference):
-
-# FROM python:3.11
-
-# WORKDIR /app
-
-# COPY requirements.txt .
-# RUN pip install -r requirements.txt
-
-# COPY . .
-
-# EXPOSE 8001
-
-# CMD ["python", "-m", "app.main"]
-
-
-

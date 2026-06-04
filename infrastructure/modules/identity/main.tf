@@ -1,13 +1,81 @@
+# modules/identity/main.tf
+#
+# Key fix: Separate execution roles from task roles.
+#
+# execution_role  = used by the ECS AGENT before container starts
+#                   needs: ECR pull, Secrets Manager read, CloudWatch logs
+#
+# task_role       = used by APPLICATION CODE inside the running container
+#                   needs: only what the app calls at runtime (S3, etc.)
+#
+# Using the same role for both is the root cause of all secrets errors.
+
 # ── Data sources ──────────────────────────────────────────────────────────────
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-# ── payments-api ECS Task Role ────────────────────────────────────────────────
+# ── payments-api Execution Role ───────────────────────────────────────────────
+# Used by the ECS agent to pull secrets and images BEFORE container starts.
+
+resource "aws_iam_role" "payments_api_execution" {
+  name        = "${var.name_prefix}-payments-api-execution-role"
+  description = "ECS execution role for payments-api - pulls secrets and images"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "payments_api_execution_managed" {
+  role       = aws_iam_role.payments_api_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role_policy" "payments_api_execution_secrets" {
+  name = "${var.name_prefix}-payments-api-execution-secrets"
+  role = aws_iam_role.payments_api_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SecretsManagerRead"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.name_prefix}/payments-api/*"
+      },
+      {
+        Sid    = "KMSDecrypt"
+        Effect = "Allow"
+        Action = ["kms:Decrypt"]
+        Resource = "*"
+        Condition = {
+          StringLike = {
+            "kms:ViaService" = "secretsmanager.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# ── payments-api Task Role ────────────────────────────────────────────────────
+# Used by APPLICATION CODE inside the running container.
 
 resource "aws_iam_role" "payments_api_task" {
   name        = "${var.name_prefix}-payments-api-task-role"
-  description = "ECS task role for payments-api - least privilege"
+  description = "ECS task role for payments-api - least privilege runtime permissions"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -29,29 +97,6 @@ resource "aws_iam_role_policy" "payments_api_task" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "SecretsManagerRead"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret"
-        ]
-        Resource = "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.name_prefix}/payments-api/*"
-      },
-      {
-        Sid    = "KMSDecrypt"
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey"
-        ]
-        Resource = "*"
-        Condition = {
-          StringLike = {
-            "kms:ViaService" = "secretsmanager.${data.aws_region.current.name}.amazonaws.com"
-          }
-        }
-      },
-      {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = [
@@ -64,16 +109,72 @@ resource "aws_iam_role_policy" "payments_api_task" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "payments_api_execution" {
-  role       = aws_iam_role.payments_api_task.name
+# ── kyc-api Execution Role ────────────────────────────────────────────────────
+# Used by the ECS agent to pull secrets and images BEFORE container starts.
+# kyc-api reads shared payments-api/* secrets (DB, Redis, JWT).
+
+resource "aws_iam_role" "kyc_api_execution" {
+  name        = "${var.name_prefix}-kyc-api-execution-role"
+  description = "ECS execution role for kyc-api - pulls secrets and images"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "kyc_api_execution_managed" {
+  role       = aws_iam_role.kyc_api_execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ── kyc-api ECS Task Role ─────────────────────────────────────────────────────
+resource "aws_iam_role_policy" "kyc_api_execution_secrets" {
+  name = "${var.name_prefix}-kyc-api-execution-secrets"
+  role = aws_iam_role.kyc_api_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SecretsManagerRead"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        # kyc-api needs payments-api/* secrets (shared DB, Redis, JWT public key)
+        Resource = [
+          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.name_prefix}/payments-api/*",
+          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.name_prefix}/kyc-api/*"
+        ]
+      },
+      {
+        Sid    = "KMSDecrypt"
+        Effect = "Allow"
+        Action = ["kms:Decrypt"]
+        Resource = "*"
+        Condition = {
+          StringLike = {
+            "kms:ViaService" = "secretsmanager.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# ── kyc-api Task Role ─────────────────────────────────────────────────────────
+# Used by APPLICATION CODE inside the running container.
 
 resource "aws_iam_role" "kyc_api_task" {
   name        = "${var.name_prefix}-kyc-api-task-role"
-  description = "ECS task role for kyc-api - least privilege"
+  description = "ECS task role for kyc-api - least privilege runtime permissions"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -111,32 +212,13 @@ resource "aws_iam_role_policy" "kyc_api_task" {
         Resource = "arn:aws:s3:::${var.name_prefix}-kyc-documents"
       },
       {
-        # kyc-api needs to read payments-api secrets (shared DB, Redis, JWT)
-        Sid    = "SecretsManagerRead"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret"
-        ]
-        Resource = [
-          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.name_prefix}/kyc-api/*",
-          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.name_prefix}/payments-api/*"
-        ]
-      },
-      {
         Sid    = "KMSDecrypt"
         Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey"
-        ]
+        Action = ["kms:Decrypt", "kms:GenerateDataKey"]
         Resource = "*"
         Condition = {
           StringLike = {
-            "kms:ViaService" = [
-              "secretsmanager.${data.aws_region.current.name}.amazonaws.com",
-              "s3.${data.aws_region.current.name}.amazonaws.com"
-            ]
+            "kms:ViaService" = "s3.${data.aws_region.current.name}.amazonaws.com"
           }
         }
       },
@@ -153,16 +235,10 @@ resource "aws_iam_role_policy" "kyc_api_task" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "kyc_api_execution" {
-  role       = aws_iam_role.kyc_api_task.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
 # ── GitHub Actions OIDC Provider ──────────────────────────────────────────────
 
 resource "aws_iam_openid_connect_provider" "github_actions" {
-  url = "https://token.actions.githubusercontent.com"
-
+  url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 
@@ -188,7 +264,6 @@ resource "aws_iam_role" "github_actions_deploy" {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
         StringLike = {
-          # Allow any ref from the repo — supports branches, tags, and merge commits
           "token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo}:*"
         }
       }
@@ -206,10 +281,15 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid    = "ECRAuth"
+        Effect = "Allow"
+        Action = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
+      },
+      {
         Sid    = "ECRPush"
         Effect = "Allow"
         Action = [
-          "ecr:GetAuthorizationToken",
           "ecr:BatchCheckLayerAvailability",
           "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage",
@@ -218,7 +298,10 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "ecr:CompleteLayerUpload",
           "ecr:PutImage"
         ]
-        Resource = "*"
+        Resource = [
+          "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${var.name_prefix}/payments-api",
+          "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${var.name_prefix}/kyc-api"
+        ]
       },
       {
         Sid    = "ECSDeployment"
@@ -237,18 +320,18 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
         Effect = "Allow"
         Action = ["iam:PassRole"]
         Resource = [
+          aws_iam_role.payments_api_execution.arn,
           aws_iam_role.payments_api_task.arn,
+          aws_iam_role.kyc_api_execution.arn,
           aws_iam_role.kyc_api_task.arn
         ]
       },
       {
-        Sid    = "CloudWatchLogs"
+        Sid    = "ECSWait"
         Effect = "Allow"
         Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogGroups"
+          "ecs:DescribeTasks",
+          "ecs:ListTasks"
         ]
         Resource = "*"
       }
